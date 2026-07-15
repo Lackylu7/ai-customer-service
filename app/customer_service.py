@@ -21,6 +21,10 @@ from app.operations_models import (
 logger = logging.getLogger(__name__)
 
 
+class HandoffLabelError(ChatwootAPIError):
+    pass
+
+
 HandlingStatus = Literal[
     "replied",
     "handed_off",
@@ -204,11 +208,17 @@ class CustomerService:
             )
 
         if action.decision == "handoff":
-            self._chatwoot.add_label_preserving_existing(
-                message.account_id,
-                message.conversation_id,
-                "ai_handoff",
-            )
+            try:
+                self._chatwoot.add_label_preserving_existing(
+                    message.account_id,
+                    message.conversation_id,
+                    "ai_handoff",
+                )
+            except ChatwootAPIError as exc:
+                raise HandoffLabelError(
+                    exc.status_code,
+                    "Chatwoot handoff label update failed.",
+                ) from exc
             self._store.save_conversation(
                 message.conversation_id,
                 dify_conversation_id=None,

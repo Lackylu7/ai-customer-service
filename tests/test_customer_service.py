@@ -5,7 +5,7 @@ from pathlib import Path
 from app.chatwoot_client import ChatwootAPIError
 from app.chatwoot_events import IncomingMessage
 from app.conversation_store import SQLiteConversationStore
-from app.customer_service import CustomerService
+from app.customer_service import CustomerService, HandoffLabelError
 from app.dify_chat_client import DifyChatAPIError, DifyChatResponse
 from app.job_models import PreparedAction
 
@@ -176,10 +176,11 @@ class CustomerServiceTests(unittest.TestCase):
         action = PreparedAction.handoff("正在转接人工。", "explicit_human_request")
         self.chatwoot.raise_on_label = True
 
-        with self.assertRaises(ChatwootAPIError):
+        with self.assertRaises(HandoffLabelError) as raised:
             self.service.deliver(message, action, source_id="ai-cs:102:reply")
 
         self.assertIsNone(self.store.get_conversation(message.conversation_id))
+        self.assertIsInstance(raised.exception.__cause__, ChatwootAPIError)
 
     def test_normal_answer_is_sent_and_conversation_is_saved(self) -> None:
         result = self.service.handle(incoming("现货多久发货？"))
