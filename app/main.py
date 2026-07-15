@@ -2,16 +2,17 @@ import base64
 import binascii
 import logging
 import os
+import sqlite3
 import time
 from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from app.chatwoot_client import ChatwootAPIError, ChatwootClient
+from app.chatwoot_client import ChatwootClient
 from app.chatwoot_webhook import (
     WebhookAuthenticationError,
     WebhookPayloadError,
@@ -23,6 +24,8 @@ from app.dify_chat_client import DifyChatClient
 from app.dify_client import DifyAPIError, DifyClient
 from app.document_parser import DocumentParsingError, parse_document
 from app.knowledge_ingestion import FileTooLargeError, KnowledgeIngestionService
+from app.inbound_queue import InboundQueue
+from app.job_store import SQLiteJobStore
 from app.operations_api import operations_router
 from app.operations_models import NullOperationsRecorder, OperationsRecorder
 from app.operations_store import OperationsStore
@@ -99,8 +102,16 @@ def get_operations_recorder(database_path: Path) -> OperationsRecorder:
         return NullOperationsRecorder()
 
 
+@lru_cache(maxsize=8)
+def get_inbound_queue(database_path: Path) -> InboundQueue:
+    return InboundQueue(
+        SQLiteJobStore(database_path),
+        get_operations_recorder(database_path),
+    )
+
+
 @app.post("/v1/chatwoot/webhook")
-async def chatwoot_webhook(request: Request) -> dict[str, str]:
+async def chatwoot_webhook(request: Request, response: Response) -> dict[str, str]:
     raw_body = await request.body()
     if len(raw_body) > 256 * 1024:
         raise HTTPException(status_code=413, detail="Webhook payload is too large.")
@@ -118,7 +129,7 @@ async def chatwoot_webhook(request: Request) -> dict[str, str]:
             raw_body=raw_body,
             signature=request.headers.get("X-Chatwoot-Signature"),
             timestamp=request.headers.get("X-Chatwoot-Timestamp"),
-            service=get_customer_service(settings),
+            enqueuer=get_inbound_queue(settings.customer_service_db_path),
             webhook_secret=settings.chatwoot_webhook_secret,
             expected_account_id=settings.chatwoot_account_id,
         )
@@ -126,8 +137,14 @@ async def chatwoot_webhook(request: Request) -> dict[str, str]:
         raise HTTPException(status_code=401, detail="Invalid webhook signature.") from exc
     except WebhookPayloadError as exc:
         raise HTTPException(status_code=422, detail="Invalid webhook payload.") from exc
-    except ChatwootAPIError as exc:
-        raise HTTPException(status_code=502, detail="Chatwoot message delivery failed.") from exc
+    except sqlite3.Error as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="AI customer service is temporarily unavailable.",
+        ) from exc
+
+    if result.status == "queued":
+        response.status_code = 202
 
     return {"status": result.status}
 

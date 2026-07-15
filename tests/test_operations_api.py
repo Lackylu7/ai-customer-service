@@ -180,36 +180,23 @@ class OperationsApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
 
-    def test_customer_service_starts_when_operations_store_initialization_fails(self) -> None:
-        from app.main import get_customer_service
+    def test_inbound_queue_starts_when_operations_store_initialization_fails(self) -> None:
+        from app.main import get_inbound_queue
         from app.operations_models import NullOperationsRecorder
-        from app.settings import Settings
 
-        settings = Settings.from_env(
-            {
-                "DIFY_BASE_URL": "http://127.0.0.1:8081",
-                "DIFY_APP_API_KEY": "test-dify-key",
-                "CHATWOOT_BASE_URL": "http://127.0.0.1:3000",
-                "CHATWOOT_ACCOUNT_ID": "1",
-                "CHATWOOT_API_TOKEN": "test-chatwoot-token",
-                "CHATWOOT_WEBHOOK_SECRET": "test-webhook-secret",
-                "CUSTOMER_SERVICE_DB_PATH": str(self.database_path),
-            }
-        )
-        get_customer_service.cache_clear()
-        self.addCleanup(get_customer_service.cache_clear)
+        get_inbound_queue.cache_clear()
+        self.addCleanup(get_inbound_queue.cache_clear)
 
         with patch(
             "app.main.OperationsStore",
             side_effect=RuntimeError("operations schema unavailable"),
         ), self.assertLogs("app.main", level="WARNING") as logs:
-            service = get_customer_service(settings)
+            queue = get_inbound_queue(self.database_path)
 
-        self.assertIsInstance(service._operations, NullOperationsRecorder)
+        self.assertIsInstance(queue._operations, NullOperationsRecorder)
         self.assertTrue(
             any("Operations store initialization failed" in line for line in logs.output)
         )
-        self.assertFalse(any("test-dify-key" in line for line in logs.output))
 
 
 if __name__ == "__main__":

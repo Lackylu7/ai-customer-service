@@ -1,13 +1,13 @@
 import json
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 from app.chatwoot_events import (
     IncomingMessage,
     parse_incoming_message,
     verify_webhook_signature,
 )
-from app.customer_service import HandlingResult
+from app.job_models import EnqueueResult
 
 
 class WebhookAuthenticationError(ValueError):
@@ -18,13 +18,13 @@ class WebhookPayloadError(ValueError):
     pass
 
 
-class CustomerMessageHandler(Protocol):
-    def handle(self, message: IncomingMessage) -> HandlingResult: ...
+class IncomingMessageEnqueuer(Protocol):
+    def enqueue(self, message: IncomingMessage) -> EnqueueResult: ...
 
 
 @dataclass(frozen=True)
 class WebhookProcessingResult:
-    status: str
+    status: Literal["queued", "duplicate", "ignored"]
 
 
 def process_chatwoot_webhook(
@@ -32,7 +32,7 @@ def process_chatwoot_webhook(
     raw_body: bytes,
     signature: str | None,
     timestamp: str | None,
-    service: CustomerMessageHandler,
+    enqueuer: IncomingMessageEnqueuer,
     webhook_secret: str,
     expected_account_id: int,
     now: int | None = None,
@@ -57,5 +57,5 @@ def process_chatwoot_webhook(
     if message is None or message.account_id != expected_account_id:
         return WebhookProcessingResult(status="ignored")
 
-    result = service.handle(message)
+    result = enqueuer.enqueue(message)
     return WebhookProcessingResult(status=result.status)
