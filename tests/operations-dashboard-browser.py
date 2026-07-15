@@ -1,13 +1,17 @@
+import os
 from pathlib import Path
 
 from playwright.sync_api import Page, sync_playwright
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-BASE_URL = "http://127.0.0.1:5001"
+BASE_URL = os.getenv("OPERATIONS_BASE_URL", "http://127.0.0.1:5001")
 
 
 def read_operations_key() -> str:
+    configured_key = os.getenv("OPERATIONS_API_KEY", "").strip()
+    if configured_key:
+        return configured_key
     for line in (PROJECT_ROOT / ".env").read_text(encoding="utf-8-sig").splitlines():
         if line.startswith("OPERATIONS_API_KEY="):
             key = line.split("=", 1)[1].strip()
@@ -54,6 +58,11 @@ def verify_desktop(browser, key: str, console_errors: list[str]) -> None:
     page.wait_for_load_state("networkidle")
     unlock(page, key, verify_wrong_key=True)
     assert page.locator("#serviceStatus").get_attribute("data-status") == "online"
+    page.wait_for_function(
+        "document.querySelector('[data-queue-health]').dataset.status !== 'loading'"
+    )
+    assert page.locator("[data-worker-heartbeat]").text_content() != "—"
+    assert page.locator("[data-failed-jobs]").text_content() != "—"
     assert page.locator("#trendChart").locator("*").count() > 0
     assert page.locator("#reasonChart").locator("*").count() > 0
     assert page.evaluate("sessionStorage.getItem('operationsKey') !== null")
@@ -91,7 +100,11 @@ def verify_mobile(browser, key: str, console_errors: list[str]) -> None:
     page.goto(f"{BASE_URL}/operations")
     page.wait_for_load_state("networkidle")
     unlock(page, key)
+    page.wait_for_function(
+        "document.querySelector('[data-queue-health]').dataset.status !== 'loading'"
+    )
     assert_no_horizontal_overflow(page)
+    assert page.locator("[data-queue-health]").is_visible()
     assert page.locator("#kpiGrid").is_visible()
     assert page.locator("#trendChart").is_visible()
     page.select_option("#gapStatus", "all")

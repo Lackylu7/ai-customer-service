@@ -14,6 +14,8 @@ warnings.filterwarnings(
 )
 from fastapi.testclient import TestClient
 
+from app.chatwoot_events import IncomingMessage
+from app.job_store import SQLiteJobStore
 from app.operations_api import operations_router
 from app.operations_store import OperationsStore
 
@@ -179,6 +181,108 @@ class OperationsApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
+
+    def test_queue_health_is_protected_and_exposes_no_job_content(self) -> None:
+        headers = self.configure_key()
+        store = SQLiteJobStore(self.database_path)
+        store.enqueue(
+            IncomingMessage(
+                message_id=701,
+                account_id=1,
+                conversation_id=70,
+                sender_id=9,
+                content="private customer question",
+                labels=(),
+            ),
+            now=1_000,
+        )
+        claimed = store.claim_next("worker-a", now=1_001, lease_seconds=300)
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        store.fail(
+            claimed.id,
+            resume_stage="generating",
+            error_code="dify_auth_error",
+            now=1_002,
+        )
+        store.record_heartbeat("worker-a", now=1_010)
+        store.record_dependency_status(
+            "dify", ok=False, error_code="dify_auth_error", checked_at=1_011
+        )
+        store.record_dependency_status(
+            "chatwoot", ok=True, error_code=None, checked_at=1_012
+        )
+
+        unauthorized = self.client.get("/v1/operations/queue")
+        with patch("app.operations_api.current_timestamp", return_value=1_020):
+            response = self.client.get("/v1/operations/queue", headers=headers)
+
+        self.assertEqual(unauthorized.status_code, 401)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["queue"]["failed"], 1)
+        self.assertIn("dify", response.json()["dependencies"])
+        self.assertIn("chatwoot", response.json()["dependencies"])
+        self.assertNotIn("private customer question", response.text)
+
+    def test_readiness_requires_writable_database_and_fresh_worker_heartbeat(self) -> None:
+        from app.main import app as main_app, get_job_store
+
+        ready_environment = {
+            "DIFY_BASE_URL": "http://127.0.0.1:8081",
+            "DIFY_APP_API_KEY": "test-dify-key",
+            "CHATWOOT_BASE_URL": "http://127.0.0.1:3000",
+            "CHATWOOT_ACCOUNT_ID": "1",
+            "CHATWOOT_API_TOKEN": "test-chatwoot-token",
+            "CHATWOOT_WEBHOOK_SECRET": "test-webhook-secret",
+            "CUSTOMER_SERVICE_DB_PATH": str(self.database_path),
+        }
+        get_job_store.cache_clear()
+        self.addCleanup(get_job_store.cache_clear)
+        store = SQLiteJobStore(self.database_path)
+        store.record_heartbeat("worker-a", now=1_000)
+
+        with patch.dict(os.environ, ready_environment, clear=False), patch(
+            "app.main.current_timestamp", return_value=1_020
+        ), patch(
+            "app.main.DifyChatClient",
+            side_effect=AssertionError("readiness must not call Dify"),
+        ), patch(
+            "app.main.ChatwootClient",
+            side_effect=AssertionError("readiness must not call Chatwoot"),
+        ), TestClient(main_app) as client:
+            response = client.get("/ready")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"status": "ready"})
+
+    def test_readiness_rejects_missing_and_stale_heartbeat(self) -> None:
+        from app.main import app as main_app, get_job_store
+
+        missing_path = Path(self.temp_dir.name) / "missing-heartbeat.db"
+        environment = {
+            "DIFY_BASE_URL": "http://127.0.0.1:8081",
+            "DIFY_APP_API_KEY": "test-dify-key",
+            "CHATWOOT_BASE_URL": "http://127.0.0.1:3000",
+            "CHATWOOT_ACCOUNT_ID": "1",
+            "CHATWOOT_API_TOKEN": "test-chatwoot-token",
+            "CHATWOOT_WEBHOOK_SECRET": "test-webhook-secret",
+            "CUSTOMER_SERVICE_DB_PATH": str(missing_path),
+        }
+        get_job_store.cache_clear()
+        self.addCleanup(get_job_store.cache_clear)
+        SQLiteJobStore(missing_path)
+
+        with patch.dict(os.environ, environment, clear=False), patch(
+            "app.main.current_timestamp", return_value=1_000
+        ), TestClient(main_app) as client:
+            missing = client.get("/ready")
+            SQLiteJobStore(missing_path).record_heartbeat("worker-a", now=900)
+            stale = client.get("/ready")
+
+        self.assertEqual(missing.status_code, 503)
+        self.assertEqual(missing.json(), {"status": "not_ready"})
+        self.assertEqual(stale.status_code, 503)
+        self.assertEqual(stale.json(), {"status": "not_ready"})
 
     def test_inbound_queue_starts_when_operations_store_initialization_fails(self) -> None:
         from app.main import get_inbound_queue

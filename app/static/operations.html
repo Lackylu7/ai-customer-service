@@ -190,6 +190,19 @@
     }
     .message.visible { display: block; }
 
+    .queue-health {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 1px;
+      margin-bottom: 16px;
+      overflow: hidden;
+    }
+    .queue-health[data-status="error"] { border-color: #e1aaa4; }
+    .health-item { min-width: 0; padding: 15px 17px; background: rgba(255, 255, 255, 0.86); }
+    .health-label { display: block; color: var(--muted); font-size: 12px; }
+    .health-value { display: block; margin-top: 4px; overflow-wrap: anywhere; font-size: 17px; font-weight: 780; }
+    .health-value.danger { color: var(--danger); }
+
     .kpi-grid {
       display: grid;
       grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -262,6 +275,7 @@
     .dialog-actions { display: flex; justify-content: flex-end; margin-top: 17px; }
 
     @media (max-width: 1120px) {
+      .queue-health { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .kpi-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .charts-grid { grid-template-columns: 1fr; }
     }
@@ -277,6 +291,7 @@
       .toolbar { padding: 9px; }
       .segmented { width: 100%; }
       .segmented button { flex: 1; min-width: 0; }
+      .queue-health { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .kpi { min-height: 118px; padding: 15px; }
       .panel, .gap-panel { padding: 15px; }
@@ -290,6 +305,7 @@
     }
 
     @media (max-width: 420px) {
+      .queue-health { grid-template-columns: 1fr; }
       .kpi-grid { grid-template-columns: 1fr; }
       .top-actions { display: grid; grid-template-columns: 1fr 1fr; }
       .status-chip { grid-column: 1 / -1; }
@@ -338,6 +354,14 @@
     </div>
 
     <p id="pageMessage" class="message" role="alert"></p>
+
+    <section class="card queue-health" data-queue-health data-status="loading" aria-label="队列与依赖健康">
+      <div class="health-item"><span class="health-label">等待 / 处理中</span><strong id="queueDepth" class="health-value">—</strong></div>
+      <div class="health-item"><span class="health-label">最老等待</span><strong id="queueOldest" class="health-value">—</strong></div>
+      <div class="health-item"><span class="health-label">失败任务</span><strong id="failedJobs" class="health-value" data-failed-jobs>—</strong></div>
+      <div class="health-item"><span class="health-label">Worker 心跳</span><strong id="workerHeartbeat" class="health-value" data-worker-heartbeat>—</strong></div>
+      <div class="health-item"><span class="health-label">外部依赖</span><strong id="dependencyHealth" class="health-value">—</strong></div>
+    </section>
 
     <section id="kpiGrid" class="kpi-grid" aria-label="核心指标">
       <article class="card kpi"><span class="kpi-label">收到的唯一客户消息</span><strong id="kpiUnique" class="kpi-value">—</strong><span class="kpi-note">按最终处理结果去重</span></article>
@@ -421,6 +445,17 @@
       return new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
         .format(new Date(Number(timestamp) * 1000));
     }
+    function formatDuration(seconds) {
+      const value = Math.max(0, Number(seconds || 0));
+      if (value < 60) return `${Math.floor(value)} 秒`;
+      if (value < 3600) return `${Math.floor(value / 60)} 分钟`;
+      return `${Math.floor(value / 3600)} 小时`;
+    }
+    function heartbeatText(timestamp) {
+      if (timestamp == null) return "未上报";
+      const age = Math.max(0, Math.floor(Date.now() / 1000) - Number(timestamp));
+      return age <= 45 ? `${age} 秒前 · 正常` : `${formatDuration(age)}前 · 已过期`;
+    }
     function apiHeaders() { return { "X-Operations-Key": sessionStorage.getItem(KEY_NAME) || "" }; }
 
     function showPageMessage(message) {
@@ -465,6 +500,25 @@
       setText(byId("kpiLatency"), `${Number(summary.average_ai_duration_ms).toFixed(0)} ms`);
       renderTrend(summary.trend || []);
       renderReasons(summary.handoff_reasons || {});
+    }
+
+    function renderQueueHealth(payload) {
+      const queue = payload.queue || {};
+      const dependencies = payload.dependencies || {};
+      const depth = Number(queue.queued || 0) + Number(queue.processing || 0) + Number(queue.retry_wait || 0);
+      const failed = Number(queue.failed || 0);
+      const heartbeat = queue.last_worker_heartbeat;
+      const heartbeatAge = heartbeat == null ? Number.POSITIVE_INFINITY : Math.max(0, Math.floor(Date.now() / 1000) - Number(heartbeat));
+      const difyOk = dependencies.dify?.ok === true;
+      const chatwootOk = dependencies.chatwoot?.ok === true;
+      setText(byId("queueDepth"), `${depth} 个`);
+      setText(byId("queueOldest"), formatDuration(queue.oldest_wait_seconds));
+      setText(byId("failedJobs"), `${failed} 个`);
+      byId("failedJobs").classList.toggle("danger", failed > 0);
+      setText(byId("workerHeartbeat"), heartbeatText(heartbeat));
+      setText(byId("dependencyHealth"), `Dify ${difyOk ? "正常" : "异常"} · Chatwoot ${chatwootOk ? "正常" : "异常"}`);
+      const healthy = failed === 0 && heartbeatAge <= 45 && difyOk && chatwootOk;
+      document.querySelector("[data-queue-health]").dataset.status = healthy ? "online" : "error";
     }
 
     function renderTrend(points) {
@@ -630,12 +684,14 @@
       setText(refresh, "加载中…");
       showPageMessage("");
       try {
-        const [summaryResponse, gapsResponse] = await Promise.all([
+        const [summaryResponse, gapsResponse, queueResponse] = await Promise.all([
           api(`/v1/operations/summary?window=${state.window}`),
-          api(`/v1/operations/gaps?status=${state.status}&limit=${state.limit}&offset=${state.offset}`)
+          api(`/v1/operations/gaps?status=${state.status}&limit=${state.limit}&offset=${state.offset}`),
+          api("/v1/operations/queue")
         ]);
         renderSummary(await summaryResponse.json());
         renderGaps(await gapsResponse.json());
+        renderQueueHealth(await queueResponse.json());
       } catch (error) {
         showPageMessage("数据加载失败。请检查服务状态和运营管理密钥后重试。");
       } finally {

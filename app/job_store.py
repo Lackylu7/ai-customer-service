@@ -347,6 +347,26 @@ class SQLiteJobStore:
             last_worker_heartbeat=None if heartbeat is None else int(heartbeat),
         )
 
+    def is_writable(self) -> bool:
+        connection = sqlite3.connect(self._database_path, timeout=5)
+        try:
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                UPDATE queue_meta
+                SET value = value
+                WHERE name = 'readiness_probe'
+                """
+            )
+            connection.rollback()
+            return cursor.rowcount == 1
+        except sqlite3.Error:
+            connection.rollback()
+            return False
+        finally:
+            connection.close()
+
     def get_reconciliation_cursor(self) -> int | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -496,6 +516,12 @@ class SQLiteJobStore:
                     error_code TEXT,
                     checked_at INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS queue_meta (
+                    name TEXT PRIMARY KEY,
+                    value INTEGER NOT NULL
+                );
+                INSERT OR IGNORE INTO queue_meta (name, value)
+                VALUES ('readiness_probe', 0);
                 """
             )
 

@@ -63,6 +63,31 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def current_timestamp() -> int:
+    return int(time.time())
+
+
+@app.get("/ready")
+def ready(response: Response) -> dict[str, str]:
+    try:
+        settings = Settings.from_env()
+        store = get_job_store(settings.customer_service_db_path)
+        now = current_timestamp()
+        metrics = store.metrics(now=now)
+        heartbeat = metrics.last_worker_heartbeat
+        is_ready = (
+            store.is_writable()
+            and heartbeat is not None
+            and now - heartbeat <= 45
+        )
+    except Exception:
+        is_ready = False
+    if not is_ready:
+        response.status_code = 503
+        return {"status": "not_ready"}
+    return {"status": "ready"}
+
+
 @app.get("/operations", include_in_schema=False)
 def operations_page() -> FileResponse:
     return FileResponse(
@@ -103,9 +128,14 @@ def get_operations_recorder(database_path: Path) -> OperationsRecorder:
 
 
 @lru_cache(maxsize=8)
+def get_job_store(database_path: Path) -> SQLiteJobStore:
+    return SQLiteJobStore(database_path)
+
+
+@lru_cache(maxsize=8)
 def get_inbound_queue(database_path: Path) -> InboundQueue:
     return InboundQueue(
-        SQLiteJobStore(database_path),
+        get_job_store(database_path),
         get_operations_recorder(database_path),
     )
 

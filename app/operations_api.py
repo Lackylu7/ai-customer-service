@@ -1,4 +1,5 @@
 import hmac
+import time
 from dataclasses import asdict
 from typing import Annotated, Literal
 
@@ -6,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Res
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.operations_csv import encode_csv
+from app.job_store import SQLiteJobStore
 from app.operations_models import GapStatus
 from app.operations_store import OperationsStore, Window
 from app.settings import OperationsSettings
@@ -45,6 +47,10 @@ class GapUpdate(BaseModel):
     note: str = Field(max_length=1000)
 
 
+def current_timestamp() -> int:
+    return int(time.time())
+
+
 def require_operations_settings(request: Request) -> OperationsSettings:
     try:
         settings = OperationsSettings.from_env()
@@ -79,6 +85,22 @@ def operations_summary(
     window: Annotated[Window, Query()] = "7d",
 ) -> dict[str, object]:
     return OperationsStore(settings.database_path).get_summary(window)
+
+
+@operations_router.get("/queue")
+def operations_queue(settings: OperationsDependency) -> dict[str, object]:
+    store = SQLiteJobStore(settings.database_path)
+    metrics = store.metrics(now=current_timestamp())
+    dependencies = store.dependency_statuses()
+    for name in ("dify", "chatwoot"):
+        dependencies.setdefault(
+            name,
+            {"ok": False, "error_code": "not_checked", "checked_at": 0},
+        )
+    return {
+        "queue": asdict(metrics),
+        "dependencies": dependencies,
+    }
 
 
 @operations_router.get("/gaps")

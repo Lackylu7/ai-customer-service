@@ -64,6 +64,9 @@ class OperationsDashboardTests(unittest.TestCase):
         self.assertIn("@media (max-width: 720px)", source)
         self.assertIn("overflow-x: hidden", source)
         self.assertIn("document.createElementNS", source)
+        self.assertIn("data-queue-health", source)
+        self.assertIn("data-worker-heartbeat", source)
+        self.assertIn("data-failed-jobs", source)
 
 
 if __name__ == "__main__":
