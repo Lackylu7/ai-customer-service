@@ -49,6 +49,8 @@ class ChatwootClient:
         account_id: int,
         conversation_id: int,
         content: str,
+        *,
+        source_id: str | None = None,
     ) -> int:
         _require_positive_id(account_id, "Account ID")
         _require_positive_id(conversation_id, "Conversation ID")
@@ -60,20 +62,61 @@ class ChatwootClient:
             f"/api/v1/accounts/{account_id}/conversations/"
             f"{conversation_id}/messages"
         )
-        result = self._request_json(
-            "POST",
-            path,
-            {
-                "content": normalized_content,
-                "message_type": "outgoing",
-                "private": False,
-                "content_type": "text",
-            },
-        )
+        payload: dict[str, object] = {
+            "content": normalized_content,
+            "message_type": "outgoing",
+            "private": False,
+            "content_type": "text",
+        }
+        normalized_source_id = source_id.strip() if source_id is not None else ""
+        if normalized_source_id:
+            payload["source_id"] = normalized_source_id
+        result = self._request_json("POST", path, payload)
         message_id = result.get("id") if isinstance(result, dict) else None
         if isinstance(message_id, bool) or not isinstance(message_id, int) or message_id <= 0:
             raise ChatwootAPIError(None, "Chatwoot returned no message ID.")
         return message_id
+
+    def find_outgoing_message_by_source_id(
+        self,
+        account_id: int,
+        conversation_id: int,
+        source_id: str,
+    ) -> int | None:
+        _require_positive_id(account_id, "Account ID")
+        _require_positive_id(conversation_id, "Conversation ID")
+        normalized_source_id = source_id.strip()
+        if not normalized_source_id:
+            raise ValueError("Outgoing message source ID is required.")
+        path = (
+            f"/api/v1/accounts/{account_id}/conversations/"
+            f"{conversation_id}/messages"
+        )
+        result = self._request_json("GET", path)
+        raw_messages = result.get("payload") if isinstance(result, dict) else None
+        if not isinstance(raw_messages, list):
+            raise ChatwootAPIError(None, "Chatwoot returned invalid conversation messages.")
+
+        for message in raw_messages:
+            if not isinstance(message, dict):
+                continue
+            message_type = message.get("message_type")
+            is_outgoing = message_type == "outgoing" or (
+                isinstance(message_type, int)
+                and not isinstance(message_type, bool)
+                and message_type == 1
+            )
+            message_id = message.get("id")
+            if (
+                is_outgoing
+                and message.get("private") is False
+                and message.get("source_id") == normalized_source_id
+                and isinstance(message_id, int)
+                and not isinstance(message_id, bool)
+                and message_id > 0
+            ):
+                return message_id
+        return None
 
     def get_labels(self, account_id: int, conversation_id: int) -> tuple[str, ...]:
         _require_positive_id(account_id, "Account ID")

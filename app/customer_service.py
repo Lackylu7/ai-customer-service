@@ -9,6 +9,7 @@ from app.chatwoot_events import IncomingMessage
 from app.conversation_store import ConversationState
 from app.dify_chat_client import DifyChatAPIError, DifyChatResponse
 from app.handoff_policy import handoff_reason, parse_dify_answer
+from app.job_models import PreparedAction
 from app.operations_models import (
     NullOperationsRecorder,
     OperationsRecorder,
@@ -57,11 +58,20 @@ class DifyChatProvider(Protocol):
 
 
 class ChatwootPublisher(Protocol):
+    def find_outgoing_message_by_source_id(
+        self,
+        account_id: int,
+        conversation_id: int,
+        source_id: str,
+    ) -> int | None: ...
+
     def send_outgoing_message(
         self,
         account_id: int,
         conversation_id: int,
         content: str,
+        *,
+        source_id: str | None = None,
     ) -> int: ...
 
     def add_label_preserving_existing(
@@ -107,81 +117,23 @@ class CustomerService:
             return HandlingResult(status="duplicate")
 
         try:
-            state = self._store.get_conversation(message.conversation_id)
-            if state is not None and state.mode == "human":
-                self._store.complete_message(message.message_id)
-                self._record_event(
-                    message,
-                    outcome="ignored_human_mode",
-                    reason=None,
-                    started_at=started_at,
-                )
-                return HandlingResult(status="ignored_human_mode")
-
-            rule_reason = handoff_reason(message.content)
-            if rule_reason is not None:
-                self._handoff(message, self._DEFAULT_HANDOFF_TEXT)
-                self._store.complete_message(message.message_id)
-                self._record_event(
-                    message,
-                    outcome="handed_off",
-                    reason=cast(Reason, rule_reason),
-                    started_at=started_at,
-                )
-                return HandlingResult(status="handed_off")
-
             try:
-                response = self._dify.send_message(
-                    query=message.content,
-                    user=f"chatwoot:{message.sender_id}",
-                    conversation_id=(state.dify_conversation_id if state else None),
-                )
+                action = self.prepare(message)
             except DifyChatAPIError:
-                self._handoff(message, self._DEFAULT_HANDOFF_TEXT)
-                self._store.complete_message(message.message_id)
-                self._record_event(
-                    message,
-                    outcome="handed_off",
-                    reason="dify_error",
-                    started_at=started_at,
-                )
-                return HandlingResult(status="handed_off")
+                action = self.dify_error_action()
 
-            parsed = parse_dify_answer(response.answer)
-            if parsed.needs_human:
-                is_knowledge_gap = response.answer.strip().upper().startswith(
-                    "[HANDOFF]"
-                )
-                self._handoff(message, parsed.customer_text)
-                self._store.complete_message(message.message_id)
-                self._record_event(
-                    message,
-                    outcome="handed_off",
-                    reason=("knowledge_gap" if is_knowledge_gap else "dify_error"),
-                    started_at=started_at,
-                )
-                if is_knowledge_gap:
-                    self._record_gap(message)
-                return HandlingResult(status="handed_off")
-
-            self._chatwoot.send_outgoing_message(
-                message.account_id,
-                message.conversation_id,
-                parsed.customer_text,
-            )
-            self._store.save_conversation(
-                message.conversation_id,
-                dify_conversation_id=response.conversation_id,
-                mode="ai",
+            self.deliver(
+                message,
+                action,
+                source_id=f"ai-cs:{message.message_id}:reply",
             )
             self._store.complete_message(message.message_id)
-            self._record_event(
+            self.record_result(
                 message,
-                outcome="replied",
-                reason=None,
-                started_at=started_at,
+                action,
+                duration_ms=self._elapsed_ms(started_at),
             )
-            return HandlingResult(status="replied")
+            return HandlingResult(status=cast(HandlingStatus, action.outcome))
         except Exception as exc:
             self._store.release_message(message.message_id)
             self._record_event(
@@ -195,6 +147,99 @@ class CustomerService:
                 started_at=started_at,
             )
             raise
+
+    def prepare(self, message: IncomingMessage) -> PreparedAction:
+        state = self._store.get_conversation(message.conversation_id)
+        if state is not None and state.mode == "human":
+            return PreparedAction.ignore_human_mode()
+
+        rule_reason = handoff_reason(message.content)
+        if rule_reason is not None:
+            return PreparedAction.handoff(
+                self._DEFAULT_HANDOFF_TEXT,
+                cast(Reason, rule_reason),
+            )
+
+        response = self._dify.send_message(
+            query=message.content,
+            user=f"chatwoot:{message.sender_id}",
+            conversation_id=(state.dify_conversation_id if state else None),
+        )
+        parsed = parse_dify_answer(response.answer)
+        if parsed.needs_human:
+            reason: Reason = (
+                "knowledge_gap"
+                if response.answer.strip().upper().startswith("[HANDOFF]")
+                else "dify_error"
+            )
+            return PreparedAction.handoff(parsed.customer_text, reason)
+        return PreparedAction.reply(parsed.customer_text, response.conversation_id)
+
+    def dify_error_action(self) -> PreparedAction:
+        return PreparedAction.handoff(self._DEFAULT_HANDOFF_TEXT, "dify_error")
+
+    def deliver(
+        self,
+        message: IncomingMessage,
+        action: PreparedAction,
+        *,
+        source_id: str,
+    ) -> None:
+        if action.decision == "ignore":
+            return
+        if action.customer_text is None:
+            raise ValueError("Customer-visible action text is required.")
+
+        existing_message_id = self._chatwoot.find_outgoing_message_by_source_id(
+            message.account_id,
+            message.conversation_id,
+            source_id,
+        )
+        if existing_message_id is None:
+            self._chatwoot.send_outgoing_message(
+                message.account_id,
+                message.conversation_id,
+                action.customer_text,
+                source_id=source_id,
+            )
+
+        if action.decision == "handoff":
+            self._chatwoot.add_label_preserving_existing(
+                message.account_id,
+                message.conversation_id,
+                "ai_handoff",
+            )
+            self._store.save_conversation(
+                message.conversation_id,
+                dify_conversation_id=None,
+                mode="human",
+            )
+            return
+
+        self._store.save_conversation(
+            message.conversation_id,
+            dify_conversation_id=action.dify_conversation_id,
+            mode="ai",
+        )
+
+    def record_result(
+        self,
+        message: IncomingMessage,
+        action: PreparedAction,
+        duration_ms: int,
+    ) -> None:
+        try:
+            self._operations.record_event(
+                message_id=message.message_id,
+                conversation_id=message.conversation_id,
+                outcome=action.outcome,
+                reason=action.reason,
+                duration_ms=max(0, duration_ms),
+            )
+        except Exception:
+            logger.warning("Operations event recording failed.", exc_info=True)
+        if action.record_knowledge_gap:
+            self._record_gap(message)
 
     def _record_event(
         self,
@@ -216,6 +261,9 @@ class CustomerService:
         except Exception:
             logger.warning("Operations event recording failed.", exc_info=True)
 
+    def _elapsed_ms(self, started_at: float) -> int:
+        return max(0, int((self._monotonic() - started_at) * 1000))
+
     def _record_gap(self, message: IncomingMessage) -> None:
         try:
             self._operations.record_knowledge_gap(
@@ -227,23 +275,3 @@ class CustomerService:
                 "Operations knowledge-gap recording failed.",
                 exc_info=True,
             )
-
-    def _handoff(self, message: IncomingMessage, customer_text: str) -> None:
-        self._chatwoot.send_outgoing_message(
-            message.account_id,
-            message.conversation_id,
-            customer_text,
-        )
-        try:
-            self._chatwoot.add_label_preserving_existing(
-                message.account_id,
-                message.conversation_id,
-                "ai_handoff",
-            )
-        except ChatwootAPIError:
-            pass
-        self._store.save_conversation(
-            message.conversation_id,
-            dify_conversation_id=None,
-            mode="human",
-        )

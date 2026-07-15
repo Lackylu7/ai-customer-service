@@ -27,14 +27,26 @@ class AlwaysUnknownDify:
 class RecordingChatwoot:
     def __init__(self) -> None:
         self.messages: list[str] = []
+        self.source_ids: list[str | None] = []
+
+    def find_outgoing_message_by_source_id(
+        self,
+        account_id: int,
+        conversation_id: int,
+        source_id: str,
+    ) -> int | None:
+        return None
 
     def send_outgoing_message(
         self,
         account_id: int,
         conversation_id: int,
         content: str,
+        *,
+        source_id: str | None = None,
     ) -> int:
         self.messages.append(content)
+        self.source_ids.append(source_id)
         return len(self.messages)
 
     def add_label_preserving_existing(

@@ -7,6 +7,7 @@ from app.chatwoot_events import IncomingMessage
 from app.conversation_store import SQLiteConversationStore
 from app.customer_service import CustomerService
 from app.dify_chat_client import DifyChatAPIError, DifyChatResponse
+from app.job_models import PreparedAction
 
 
 class FakeDifyChatClient:
@@ -40,21 +41,38 @@ class FakeDifyChatClient:
 
 class FakeChatwootClient:
     def __init__(self) -> None:
-        self.messages: list[str] = []
+        self.sent_messages: list[str] = []
+        self.messages = self.sent_messages
+        self.source_ids: list[str | None] = []
+        self.existing_source_ids: dict[str, int] = {}
         self.label_calls: list[str] = []
         self.fail_message = False
-        self.fail_label = False
+        self.raise_on_label = False
+
+    def find_outgoing_message_by_source_id(
+        self,
+        account_id: int,
+        conversation_id: int,
+        source_id: str,
+    ) -> int | None:
+        return self.existing_source_ids.get(source_id)
 
     def send_outgoing_message(
         self,
         account_id: int,
         conversation_id: int,
         content: str,
+        *,
+        source_id: str | None = None,
     ) -> int:
         if self.fail_message:
             raise ChatwootAPIError(503, "unavailable")
-        self.messages.append(content)
-        return 501 + len(self.messages)
+        self.sent_messages.append(content)
+        self.source_ids.append(source_id)
+        message_id = 501 + len(self.sent_messages)
+        if source_id is not None:
+            self.existing_source_ids[source_id] = message_id
+        return message_id
 
     def add_label_preserving_existing(
         self,
@@ -63,7 +81,7 @@ class FakeChatwootClient:
         label: str,
     ) -> tuple[str, ...]:
         self.label_calls.append(label)
-        if self.fail_label:
+        if self.raise_on_label:
             raise ChatwootAPIError(503, "unavailable")
         return ("vip", label)
 
@@ -126,6 +144,42 @@ class CustomerServiceTests(unittest.TestCase):
             operations_recorder=self.operations,
             monotonic=FakeMonotonic(),
         )
+
+    def test_prepare_builds_reply_without_chatwoot_side_effect(self) -> None:
+        self.dify.response = DifyChatResponse(
+            answer="48 小时内发货。",
+            conversation_id="dify-7",
+            retriever_resources=(),
+        )
+
+        action = self.service.prepare(incoming("现货多久发货？"))
+
+        self.assertEqual(action, PreparedAction.reply("48 小时内发货。", "dify-7"))
+        self.assertEqual(self.chatwoot.sent_messages, [])
+        self.assertIsNone(self.store.get_conversation(9))
+
+    def test_deliver_reuses_existing_source_id_before_saving_reply_state(self) -> None:
+        message = incoming("现货多久发货？")
+        action = PreparedAction.reply("48 小时内发货。", "dify-7")
+        self.chatwoot.existing_source_ids["ai-cs:101:reply"] = 9001
+
+        self.service.deliver(message, action, source_id="ai-cs:101:reply")
+
+        self.assertEqual(self.chatwoot.sent_messages, [])
+        state = self.store.get_conversation(message.conversation_id)
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual((state.mode, state.dify_conversation_id), ("ai", "dify-7"))
+
+    def test_handoff_label_must_succeed_before_local_human_mode(self) -> None:
+        message = incoming("我要人工客服", message_id=102)
+        action = PreparedAction.handoff("正在转接人工。", "explicit_human_request")
+        self.chatwoot.raise_on_label = True
+
+        with self.assertRaises(ChatwootAPIError):
+            self.service.deliver(message, action, source_id="ai-cs:102:reply")
+
+        self.assertIsNone(self.store.get_conversation(message.conversation_id))
 
     def test_normal_answer_is_sent_and_conversation_is_saved(self) -> None:
         result = self.service.handle(incoming("现货多久发货？"))
@@ -271,17 +325,18 @@ class CustomerServiceTests(unittest.TestCase):
         )
         self.assertEqual(self.operations.events[0]["reason"], "chatwoot_error")
 
-    def test_label_failure_still_switches_local_state_to_human(self) -> None:
-        self.chatwoot.fail_label = True
+    def test_label_failure_releases_claim_without_switching_local_state(self) -> None:
+        self.chatwoot.raise_on_label = True
 
-        result = self.service.handle(incoming("我要人工客服"))
+        with self.assertRaises(ChatwootAPIError):
+            self.service.handle(incoming("我要人工客服"))
 
-        self.assertEqual(result.status, "handed_off")
+        self.assertIsNone(self.store.get_conversation(9))
+        self.chatwoot.raise_on_label = False
+        retry = self.service.handle(incoming("我要人工客服"))
+        self.assertEqual(retry.status, "handed_off")
         self.assertEqual(self.store.get_conversation(9).mode, "human")
-        self.assertEqual(
-            self.service.handle(incoming("还在吗？", message_id=102)).status,
-            "ignored_human_mode",
-        )
+        self.assertEqual(len(self.chatwoot.sent_messages), 1)
 
     def test_each_rule_handoff_records_its_specific_reason(self) -> None:
         cases = (

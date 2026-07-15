@@ -40,6 +40,7 @@ class ChatwootClientTests(unittest.TestCase):
             account_id=1,
             conversation_id=42,
             content="现货会在 48 小时内发出。",
+            source_id="ai-cs:101:reply",
         )
 
         request = captured["request"]
@@ -59,9 +60,54 @@ class ChatwootClientTests(unittest.TestCase):
                 "message_type": "outgoing",
                 "private": False,
                 "content_type": "text",
+                "source_id": "ai-cs:101:reply",
             },
         )
         self.assertEqual(message_id, 501)
+
+    def test_finds_matching_public_outgoing_message_by_source_id(self) -> None:
+        def opener(request: object, timeout: float) -> FakeResponse:
+            return FakeResponse(
+                {
+                    "payload": [
+                        {
+                            "id": 1,
+                            "message_type": "outgoing",
+                            "private": True,
+                            "source_id": "ai-cs:101:reply",
+                        },
+                        {
+                            "id": 2,
+                            "message_type": "incoming",
+                            "private": False,
+                            "source_id": "ai-cs:101:reply",
+                        },
+                        {
+                            "id": 3,
+                            "message_type": 1,
+                            "private": False,
+                            "source_id": "ai-cs:other:reply",
+                        },
+                        {
+                            "id": 9001,
+                            "message_type": 1,
+                            "private": False,
+                            "source_id": "ai-cs:101:reply",
+                        },
+                    ]
+                }
+            )
+
+        client = ChatwootClient(
+            base_url="http://127.0.0.1:3000",
+            api_token="chatwoot-secret",
+            opener=opener,
+        )
+
+        self.assertEqual(
+            client.find_outgoing_message_by_source_id(1, 42, "ai-cs:101:reply"),
+            9001,
+        )
 
     def test_add_label_preserves_existing_labels(self) -> None:
         requests: list[object] = []
