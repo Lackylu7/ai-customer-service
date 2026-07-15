@@ -8,10 +8,12 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from app.chatwoot_client import ChatwootClient
+from app.chatwoot_client import ChatwootAPIError, ChatwootClient
+from app.chatwoot_reconciliation import ChatwootReconciler
 from app.conversation_store import SQLiteConversationStore
 from app.customer_service import CustomerService
 from app.dify_chat_client import DifyChatClient
+from app.inbound_queue import InboundQueue
 from app.job_processor import JobProcessor
 from app.job_store import SQLiteJobStore
 from app.operations_models import NullOperationsRecorder
@@ -34,6 +36,7 @@ class WorkerSupervisor:
         process_id: int | None = None,
         idle_wait: Callable[[float], None] | None = None,
         heartbeat_interval_seconds: float = 15,
+        reconciler: ChatwootReconciler | None = None,
     ) -> None:
         if heartbeat_interval_seconds <= 0:
             raise ValueError("Heartbeat interval must be positive.")
@@ -45,10 +48,18 @@ class WorkerSupervisor:
         self._process_id = os.getpid() if process_id is None else process_id
         self._idle_wait = idle_wait
         self._heartbeat_interval_seconds = heartbeat_interval_seconds
+        self._reconciler = reconciler
 
     def run(self, stop_event: threading.Event) -> None:
         supervisor_id = f"{self._hostname}:{self._process_id}:supervisor"
-        self._maintain(supervisor_id)
+        now = self._clock()
+        self._maintain(supervisor_id, now=now)
+        self._run_reconciliation(now=now)
+        next_reconciliation_at = now + self._settings.reconcile_interval_seconds
+        supervisor_interval_seconds = min(
+            self._heartbeat_interval_seconds,
+            self._settings.reconcile_interval_seconds,
+        )
         threads = [
             threading.Thread(
                 target=self._worker_loop,
@@ -62,8 +73,14 @@ class WorkerSupervisor:
             thread.start()
 
         try:
-            while not stop_event.wait(self._heartbeat_interval_seconds):
-                self._maintain(supervisor_id)
+            while not stop_event.wait(supervisor_interval_seconds):
+                now = self._clock()
+                self._maintain(supervisor_id, now=now)
+                if now >= next_reconciliation_at:
+                    self._run_reconciliation(now=now)
+                    next_reconciliation_at = (
+                        now + self._settings.reconcile_interval_seconds
+                    )
         finally:
             stop_event.set()
             deadline = time.monotonic() + self._settings.lease_seconds
@@ -71,13 +88,40 @@ class WorkerSupervisor:
                 remaining = max(0.0, deadline - time.monotonic())
                 thread.join(timeout=remaining)
 
-    def _maintain(self, supervisor_id: str) -> None:
-        now = self._clock()
+    def _maintain(self, supervisor_id: str, *, now: int) -> None:
         self._store.recover_expired_leases(
             now=now,
             lease_seconds=self._settings.lease_seconds,
         )
         self._store.record_heartbeat(supervisor_id, now=now)
+
+    def _run_reconciliation(self, *, now: int) -> None:
+        if self._reconciler is None:
+            return
+        try:
+            self._reconciler.run_once(now=now)
+        except Exception as exc:
+            error_code = _reconciliation_error_code(exc)
+            try:
+                self._store.record_dependency_status(
+                    "chatwoot",
+                    ok=False,
+                    error_code=error_code,
+                    checked_at=now,
+                )
+            except Exception:
+                logger.warning("Chatwoot dependency status recording failed.")
+            logger.warning("Chatwoot reconciliation failed.")
+            return
+        try:
+            self._store.record_dependency_status(
+                "chatwoot",
+                ok=True,
+                error_code=None,
+                checked_at=now,
+            )
+        except Exception:
+            logger.warning("Chatwoot dependency status recording failed.")
 
     def _worker_loop(self, slot: int, stop_event: threading.Event) -> None:
         worker_id = f"{self._hostname}:{self._process_id}:{slot}"
@@ -118,6 +162,11 @@ def build_supervisor() -> WorkerSupervisor:
             exc_info=True,
         )
         operations = NullOperationsRecorder()
+    chatwoot_client = ChatwootClient(
+        base_url=settings.chatwoot_base_url,
+        api_token=settings.chatwoot_api_token,
+        timeout=15,
+    )
     service = CustomerService(
         store=SQLiteConversationStore(settings.customer_service_db_path),
         dify_client=DifyChatClient(
@@ -125,11 +174,7 @@ def build_supervisor() -> WorkerSupervisor:
             api_key=settings.dify_app_api_key,
             timeout=60,
         ),
-        chatwoot_client=ChatwootClient(
-            base_url=settings.chatwoot_base_url,
-            api_token=settings.chatwoot_api_token,
-            timeout=15,
-        ),
+        chatwoot_client=chatwoot_client,
         operations_recorder=operations,
     )
     processor = JobProcessor(
@@ -141,7 +186,25 @@ def build_supervisor() -> WorkerSupervisor:
         store=job_store,
         processor=processor,
         settings=worker_settings,
+        reconciler=ChatwootReconciler(
+            account_id=settings.chatwoot_account_id,
+            store=job_store,
+            queue=InboundQueue(job_store, operations),
+            chatwoot=chatwoot_client,
+        ),
     )
+
+
+def _reconciliation_error_code(error: Exception) -> str:
+    if not isinstance(error, ChatwootAPIError):
+        return "chatwoot_reconciliation_error"
+    if error.status_code in {401, 403}:
+        return "chatwoot_auth_error"
+    if error.status_code == 429:
+        return "chatwoot_rate_limited"
+    if error.status_code is not None and error.status_code >= 500:
+        return "chatwoot_server_error"
+    return "chatwoot_timeout" if error.status_code is None else "chatwoot_request_error"
 
 
 def main(argv: list[str] | None = None) -> int:

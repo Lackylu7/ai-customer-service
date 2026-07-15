@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass
 from typing import Callable, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -13,6 +14,13 @@ class Response(Protocol):
 
 
 OpenUrl = Callable[..., Response]
+
+
+@dataclass(frozen=True)
+class ChatwootConversation:
+    id: int
+    labels: tuple[str, ...]
+    last_activity_at: int
 
 
 class ChatwootAPIError(RuntimeError):
@@ -118,6 +126,65 @@ class ChatwootClient:
                 return message_id
         return None
 
+    def list_conversations_page(
+        self,
+        account_id: int,
+        page: int,
+    ) -> tuple[ChatwootConversation, ...]:
+        _require_positive_id(account_id, "Account ID")
+        _require_positive_id(page, "Page")
+        path = (
+            f"/api/v1/accounts/{account_id}/conversations"
+            f"?status=all&sort_by=last_activity_at_desc&page={page}"
+        )
+        result = self._request_json("GET", path)
+        data = result.get("data") if isinstance(result, dict) else None
+        raw_conversations = data.get("payload") if isinstance(data, dict) else None
+        if not isinstance(raw_conversations, list):
+            raise ChatwootAPIError(None, "Chatwoot returned invalid conversations.")
+
+        conversations: list[ChatwootConversation] = []
+        for raw in raw_conversations:
+            if not isinstance(raw, dict):
+                raise ChatwootAPIError(None, "Chatwoot returned invalid conversations.")
+            conversation_id = raw.get("id")
+            raw_labels = raw.get("labels")
+            last_activity_at = raw.get("last_activity_at")
+            if (
+                not _is_positive_int(conversation_id)
+                or not isinstance(raw_labels, list)
+                or not isinstance(last_activity_at, int)
+                or isinstance(last_activity_at, bool)
+                or last_activity_at < 0
+                or any(not isinstance(label, str) for label in raw_labels)
+            ):
+                raise ChatwootAPIError(None, "Chatwoot returned invalid conversations.")
+            conversations.append(
+                ChatwootConversation(
+                    id=conversation_id,
+                    labels=tuple(label.strip() for label in raw_labels if label.strip()),
+                    last_activity_at=last_activity_at,
+                )
+            )
+        return tuple(conversations)
+
+    def list_conversation_messages(
+        self,
+        account_id: int,
+        conversation_id: int,
+    ) -> tuple[dict[str, object], ...]:
+        _require_positive_id(account_id, "Account ID")
+        _require_positive_id(conversation_id, "Conversation ID")
+        path = (
+            f"/api/v1/accounts/{account_id}/conversations/"
+            f"{conversation_id}/messages"
+        )
+        result = self._request_json("GET", path)
+        raw_messages = result.get("payload") if isinstance(result, dict) else None
+        if not isinstance(raw_messages, list):
+            raise ChatwootAPIError(None, "Chatwoot returned invalid conversation messages.")
+        return tuple(message for message in raw_messages if isinstance(message, dict))
+
     def get_labels(self, account_id: int, conversation_id: int) -> tuple[str, ...]:
         _require_positive_id(account_id, "Account ID")
         _require_positive_id(conversation_id, "Conversation ID")
@@ -209,5 +276,9 @@ class ChatwootClient:
 
 
 def _require_positive_id(value: int, label: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+    if not _is_positive_int(value):
         raise ValueError(f"{label} must be a positive integer.")
+
+
+def _is_positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0

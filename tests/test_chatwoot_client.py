@@ -3,7 +3,7 @@ import json
 import unittest
 from urllib.error import HTTPError
 
-from app.chatwoot_client import ChatwootAPIError, ChatwootClient
+from app.chatwoot_client import ChatwootAPIError, ChatwootClient, ChatwootConversation
 
 
 class FakeResponse:
@@ -21,6 +21,76 @@ class FakeResponse:
 
 
 class ChatwootClientTests(unittest.TestCase):
+    def test_lists_conversations_and_dictionary_messages(self) -> None:
+        requests: list[object] = []
+
+        def opener(request: object, timeout: float) -> FakeResponse:
+            requests.append(request)
+            if "?status=all" in request.full_url:
+                return FakeResponse(
+                    {
+                        "data": {
+                            "payload": [
+                                {"id": 7, "labels": ["vip"], "last_activity_at": 1_000}
+                            ]
+                        }
+                    }
+                )
+            return FakeResponse(
+                {
+                    "payload": [
+                        {
+                            "id": 501,
+                            "message_type": 0,
+                            "private": False,
+                            "content_type": "text",
+                            "content": "退款多久到帐？",
+                            "created_at": 1_001,
+                            "sender": {"id": 9},
+                        },
+                        "ignored-non-dictionary",
+                    ]
+                }
+            )
+
+        client = ChatwootClient(
+            base_url="http://127.0.0.1:3000",
+            api_token="chatwoot-secret",
+            opener=opener,
+        )
+
+        conversations = client.list_conversations_page(2, 3)
+        messages = client.list_conversation_messages(2, 7)
+
+        self.assertEqual(
+            conversations,
+            (ChatwootConversation(id=7, labels=("vip",), last_activity_at=1_000),),
+        )
+        self.assertEqual(messages[0]["id"], 501)
+        self.assertEqual(len(messages), 1)
+        self.assertTrue(
+            requests[0].full_url.endswith(
+                "/api/v1/accounts/2/conversations?status=all&sort_by=last_activity_at_desc&page=3"
+            )
+        )
+
+    def test_list_methods_reject_malformed_payload_shapes(self) -> None:
+        responses = iter((FakeResponse({"data": {"payload": "bad"}}), FakeResponse({"payload": {}})))
+
+        def opener(request: object, timeout: float) -> FakeResponse:
+            return next(responses)
+
+        client = ChatwootClient(
+            base_url="http://127.0.0.1:3000",
+            api_token="chatwoot-secret",
+            opener=opener,
+        )
+
+        with self.assertRaises(ChatwootAPIError):
+            client.list_conversations_page(1, 1)
+        with self.assertRaises(ChatwootAPIError):
+            client.list_conversation_messages(1, 7)
+
     def test_sends_public_outgoing_message(self) -> None:
         captured: dict[str, object] = {}
 

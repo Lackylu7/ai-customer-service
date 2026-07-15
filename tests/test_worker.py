@@ -2,6 +2,7 @@ import threading
 import time
 import unittest
 
+from app.chatwoot_client import ChatwootAPIError
 from app.job_models import DurableJob, PreparedAction
 from app.settings import WorkerSettings
 from app.worker import WorkerSupervisor, retry_failed_job
@@ -50,6 +51,7 @@ class FakeWorkerStore:
         self.events: list[str] = []
         self.stop_on_claim: threading.Event | None = None
         self.retry_result = False
+        self.dependencies: list[dict[str, object]] = []
 
     def claim_next(
         self,
@@ -78,6 +80,43 @@ class FakeWorkerStore:
 
     def retry_failed_message(self, message_id: int, *, now: int) -> bool:
         return self.retry_result
+
+    def record_dependency_status(
+        self,
+        name: str,
+        *,
+        ok: bool,
+        error_code: str | None,
+        checked_at: int,
+    ) -> None:
+        self.dependencies.append(
+            {
+                "name": name,
+                "ok": ok,
+                "error_code": error_code,
+                "checked_at": checked_at,
+            }
+        )
+
+
+class FakeReconciler:
+    def __init__(
+        self,
+        *,
+        stop_event: threading.Event | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.stop_event = stop_event
+        self.error = error
+        self.calls: list[int] = []
+
+    def run_once(self, *, now: int) -> int:
+        self.calls.append(now)
+        if self.error is not None:
+            raise self.error
+        if len(self.calls) >= 2 and self.stop_event is not None:
+            self.stop_event.set()
+        return 0
 
 
 class RecordingProcessor:
@@ -214,6 +253,63 @@ class WorkerSupervisorTests(unittest.TestCase):
         self.assertFalse(retry_failed_job(store, 999, 1_000))
         store.retry_result = True
         self.assertTrue(retry_failed_job(store, 101, 1_001))
+
+    def test_reconciliation_runs_at_startup_and_configured_interval(self) -> None:
+        stop_event = threading.Event()
+        store = FakeWorkerStore()
+        reconciler = FakeReconciler(stop_event=stop_event)
+        current = 999
+
+        def clock() -> int:
+            nonlocal current
+            current += 1
+            return current
+
+        settings = worker_settings(concurrency=1)
+        settings = WorkerSettings(
+            concurrency=settings.concurrency,
+            lease_seconds=settings.lease_seconds,
+            reconcile_interval_seconds=1,
+            generation_max_attempts=settings.generation_max_attempts,
+            delivery_max_attempts=settings.delivery_max_attempts,
+        )
+        supervisor = WorkerSupervisor(
+            store=store,
+            processor=RecordingProcessor(),
+            settings=settings,
+            clock=clock,
+            reconciler=reconciler,
+            heartbeat_interval_seconds=0.01,
+        )
+
+        supervisor.run(stop_event)
+
+        self.assertEqual(len(reconciler.calls), 2)
+        self.assertEqual(reconciler.calls[0], 1_000)
+        self.assertGreaterEqual(reconciler.calls[1], 1_001)
+
+    def test_reconciliation_error_is_sanitized_and_does_not_stop_workers(self) -> None:
+        stop_event = threading.Event()
+        store = FakeWorkerStore()
+        store.stop_on_claim = stop_event
+        reconciler = FakeReconciler(
+            error=ChatwootAPIError(503, "sensitive remote payload")
+        )
+        supervisor = WorkerSupervisor(
+            store=store,
+            processor=RecordingProcessor(),
+            settings=worker_settings(concurrency=1),
+            reconciler=reconciler,
+            clock=lambda: 1_000,
+        )
+
+        with self.assertLogs("app.worker", level="WARNING") as logs:
+            supervisor.run(stop_event)
+
+        self.assertGreaterEqual(len(store.claim_worker_ids), 1)
+        self.assertEqual(store.dependencies[-1]["ok"], False)
+        self.assertEqual(store.dependencies[-1]["error_code"], "chatwoot_server_error")
+        self.assertFalse(any("sensitive remote payload" in line for line in logs.output))
 
 
 if __name__ == "__main__":
