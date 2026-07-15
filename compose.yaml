@@ -1,31 +1,39 @@
 name: ai-customer-service
 
+x-customer-service-base: &customer-service-base
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: ai-customer-service/docling-api:0.1.0
+  restart: unless-stopped
+  environment:
+    DOCLING_DEVICE: "${DOCLING_DEVICE:-cpu}"
+    DIFY_BASE_URL: "${DIFY_DOCKER_BASE_URL:-http://host.docker.internal:8081}"
+    DIFY_DATASET_ID: "${DIFY_DATASET_ID:-}"
+    DIFY_DATASET_API_KEY: "${DIFY_DATASET_API_KEY:-}"
+    DIFY_INDEXING_TECHNIQUE: "${DIFY_INDEXING_TECHNIQUE:-economy}"
+    DIFY_APP_ID: "${DIFY_APP_ID:-}"
+    DIFY_APP_API_KEY: "${DIFY_APP_API_KEY:-}"
+    CHATWOOT_BASE_URL: "${CHATWOOT_DOCKER_BASE_URL:-http://host.docker.internal:3000}"
+    CHATWOOT_ACCOUNT_ID: "${CHATWOOT_ACCOUNT_ID:-}"
+    CHATWOOT_INBOX_ID: "${CHATWOOT_INBOX_ID:-}"
+    CHATWOOT_API_TOKEN: "${CHATWOOT_API_TOKEN:-}"
+    CHATWOOT_WEBHOOK_SECRET: "${CHATWOOT_WEBHOOK_SECRET:-}"
+    CUSTOMER_SERVICE_DB_PATH: "/app/.runtime/customer-service/state.db"
+    CUSTOMER_SERVICE_WORKER_CONCURRENCY: "${CUSTOMER_SERVICE_WORKER_CONCURRENCY:-2}"
+    CUSTOMER_SERVICE_JOB_LEASE_SECONDS: "${CUSTOMER_SERVICE_JOB_LEASE_SECONDS:-300}"
+    CUSTOMER_SERVICE_RECONCILE_INTERVAL_SECONDS: "${CUSTOMER_SERVICE_RECONCILE_INTERVAL_SECONDS:-60}"
+    CUSTOMER_SERVICE_GENERATION_MAX_ATTEMPTS: "${CUSTOMER_SERVICE_GENERATION_MAX_ATTEMPTS:-2}"
+    CUSTOMER_SERVICE_DELIVERY_MAX_ATTEMPTS: "${CUSTOMER_SERVICE_DELIVERY_MAX_ATTEMPTS:-5}"
+    OPERATIONS_API_KEY: "${OPERATIONS_API_KEY:-}"
+  volumes:
+    - "./.runtime/customer-service:/app/.runtime/customer-service"
+
 services:
   docling:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: ai-customer-service/docling-api:0.1.0
-    restart: unless-stopped
+    <<: *customer-service-base
     ports:
       - "127.0.0.1:${DOCLING_PORT:-5001}:5001"
-    environment:
-      DOCLING_DEVICE: "${DOCLING_DEVICE:-cpu}"
-      DIFY_BASE_URL: "${DIFY_DOCKER_BASE_URL:-http://host.docker.internal:8081}"
-      DIFY_DATASET_ID: "${DIFY_DATASET_ID:-}"
-      DIFY_DATASET_API_KEY: "${DIFY_DATASET_API_KEY:-}"
-      DIFY_INDEXING_TECHNIQUE: "${DIFY_INDEXING_TECHNIQUE:-economy}"
-      DIFY_APP_ID: "${DIFY_APP_ID:-}"
-      DIFY_APP_API_KEY: "${DIFY_APP_API_KEY:-}"
-      CHATWOOT_BASE_URL: "${CHATWOOT_DOCKER_BASE_URL:-http://host.docker.internal:3000}"
-      CHATWOOT_ACCOUNT_ID: "${CHATWOOT_ACCOUNT_ID:-}"
-      CHATWOOT_INBOX_ID: "${CHATWOOT_INBOX_ID:-}"
-      CHATWOOT_API_TOKEN: "${CHATWOOT_API_TOKEN:-}"
-      CHATWOOT_WEBHOOK_SECRET: "${CHATWOOT_WEBHOOK_SECRET:-}"
-      CUSTOMER_SERVICE_DB_PATH: "/app/.runtime/customer-service/state.db"
-      OPERATIONS_API_KEY: "${OPERATIONS_API_KEY:-}"
-    volumes:
-      - "./.runtime/customer-service:/app/.runtime/customer-service"
     healthcheck:
       test:
         - CMD-SHELL
@@ -36,3 +44,9 @@ services:
       timeout: 10s
       retries: 20
       start_period: 60s
+
+  worker:
+    <<: *customer-service-base
+    command: ["python", "-m", "app.worker"]
+    healthcheck:
+      disable: true

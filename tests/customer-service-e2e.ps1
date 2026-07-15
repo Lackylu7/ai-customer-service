@@ -79,7 +79,7 @@ function Wait-ForOutgoingCount {
     param(
         [int]$ConversationId,
         [int]$ExpectedCount,
-        [int]$TimeoutSeconds = 20
+        [int]$TimeoutSeconds = 60
     )
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -95,6 +95,79 @@ function Wait-ForOutgoingCount {
     } while ([DateTime]::UtcNow -lt $deadline)
 
     throw "Timed out waiting for outgoing Chatwoot messages."
+}
+
+function Assert-WebhookAccepted {
+    param(
+        [object]$Result,
+        [string]$Scenario
+    )
+
+    if (@("queued", "duplicate") -notcontains [string]$Result.status) {
+        throw "$Scenario webhook was not accepted for durable processing."
+    }
+}
+
+function Wait-ForConversationLabel {
+    param(
+        [int]$ConversationId,
+        [string]$Label,
+        [int]$TimeoutSeconds = 30
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $labels = Invoke-ChatwootJson -Method Get -Path "/api/v1/accounts/$accountId/conversations/$ConversationId/labels"
+        if (@($labels.payload) -contains $Label) {
+            return
+        }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timed out waiting for the Chatwoot handoff label."
+}
+
+function Wait-ForOperationsDeltas {
+    param(
+        [object]$Before,
+        [int]$TimeoutSeconds = 30
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $after = Invoke-OperationsJson -Method Get -Path "/v1/operations/summary?window=all"
+        $complete = `
+            (($after.replied - $Before.replied) -ge 1) -and `
+            (($after.duplicate_webhooks - $Before.duplicate_webhooks) -ge 1) -and `
+            (($after.ignored_human_mode - $Before.ignored_human_mode) -ge 1) -and `
+            (($after.handoff_reasons.explicit_human_request - $Before.handoff_reasons.explicit_human_request) -ge 1) -and `
+            (($after.handoff_reasons.knowledge_gap - $Before.handoff_reasons.knowledge_gap) -ge 1)
+        if ($complete) {
+            return $after
+        }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timed out waiting for final customer-service operations events."
+}
+
+function Wait-ForKnowledgeGap {
+    param(
+        [int]$ConversationId,
+        [int]$TimeoutSeconds = 30
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $gapList = Invoke-OperationsJson -Method Get -Path "/v1/operations/gaps?status=pending&limit=200&offset=0"
+        $matching = @($gapList.items | Where-Object { [int]$_.last_conversation_id -eq $ConversationId })
+        if ($matching.Count -eq 1) {
+            return $matching[0]
+        }
+        if ($matching.Count -gt 1) {
+            throw "Knowledge-gap queue contains duplicate conversation entries."
+        }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timed out waiting for the knowledge-gap record."
 }
 
 function Send-SignedWebhook {
@@ -173,6 +246,8 @@ $contactId = 0
 try {
     $aiHealth = Invoke-RestMethod -Uri "$($AiServiceUrl.TrimEnd('/'))/health" -TimeoutSec 10
     if ($aiHealth.status -ne "ok") { throw "AI service is unhealthy." }
+    $aiReady = Invoke-RestMethod -Uri "$($AiServiceUrl.TrimEnd('/'))/ready" -TimeoutSec 10
+    if ($aiReady.status -ne "ready") { throw "AI service Worker is not ready." }
     Invoke-WebRequest -Uri $chatwootBaseUrl -UseBasicParsing -TimeoutSec 10 | Out-Null
     $summaryBefore = Invoke-OperationsJson -Method Get -Path "/v1/operations/summary?window=all"
 
@@ -198,10 +273,7 @@ try {
 
     $messageBase = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
     $known = Send-SignedWebhook -MessageId $messageBase -ConversationId $conversationId -SenderId $contactId -Content $knownQuestion
-    if ($known.status -ne "replied") {
-        $unexpectedMessages = @(Wait-ForOutgoingCount -ConversationId $conversationId -ExpectedCount 1)
-        throw "Known question returned '$($known.status)': $($unexpectedMessages[-1].content)"
-    }
+    Assert-WebhookAccepted -Result $known -Scenario "Known question"
     $knownMessages = @(Wait-ForOutgoingCount -ConversationId $conversationId -ExpectedCount 1)
     if ($knownMessages[0].content -notmatch $knownAnswerPattern) {
         throw "Known answer is not grounded in the expected refund policy."
@@ -212,20 +284,15 @@ try {
     $null = Wait-ForOutgoingCount -ConversationId $conversationId -ExpectedCount 1
 
     $handoff = Send-SignedWebhook -MessageId ($messageBase + 1) -ConversationId $conversationId -SenderId $contactId -Content $handoffQuestion
-    if ($handoff.status -ne "handed_off") { throw "Human-support request did not trigger handoff." }
+    Assert-WebhookAccepted -Result $handoff -Scenario "Human-support request"
     $handoffMessages = @(Wait-ForOutgoingCount -ConversationId $conversationId -ExpectedCount 2)
     if ($handoffMessages[-1].content -notmatch $handoffPattern) {
         throw "Customer did not receive the handoff notice."
     }
-    $labels = Invoke-ChatwootJson -Method Get -Path "/api/v1/accounts/$accountId/conversations/$conversationId/labels"
-    if (-not (@($labels.payload) -contains "ai_handoff")) {
-        throw "Chatwoot conversation is missing the ai_handoff label."
-    }
+    Wait-ForConversationLabel -ConversationId $conversationId -Label "ai_handoff"
 
     $afterHandoff = Send-SignedWebhook -MessageId ($messageBase + 2) -ConversationId $conversationId -SenderId $contactId -Content $afterHandoffQuestion
-    if ($afterHandoff.status -ne "ignored_human_mode") {
-        throw "AI did not remain silent after handoff."
-    }
+    Assert-WebhookAccepted -Result $afterHandoff -Scenario "Post-handoff message"
     $null = Wait-ForOutgoingCount -ConversationId $conversationId -ExpectedCount 2
 
     $gapConversationOne = Invoke-ChatwootJson -Method Post -Path "/api/v1/accounts/$accountId/conversations" -Body @{
@@ -239,22 +306,20 @@ try {
 
     $gapQuestionOne = "E2E-$testId`: what is the teleportation octopus policy code?"
     $gapOne = Send-SignedWebhook -MessageId ($messageBase + 3) -ConversationId $gapConversationIdOne -SenderId $contactId -Content $gapQuestionOne
-    if ($gapOne.status -ne "handed_off") { throw "First unknown question did not trigger knowledge-gap handoff." }
+    Assert-WebhookAccepted -Result $gapOne -Scenario "Knowledge-gap question"
     $null = Wait-ForOutgoingCount -ConversationId $gapConversationIdOne -ExpectedCount 1
 
-    $summaryAfter = Invoke-OperationsJson -Method Get -Path "/v1/operations/summary?window=all"
+    $summaryAfter = Wait-ForOperationsDeltas -Before $summaryBefore
     if (($summaryAfter.replied - $summaryBefore.replied) -lt 1) { throw "Operations summary did not record the AI reply." }
     if (($summaryAfter.duplicate_webhooks - $summaryBefore.duplicate_webhooks) -lt 1) { throw "Operations summary did not record the duplicate webhook." }
     if (($summaryAfter.ignored_human_mode - $summaryBefore.ignored_human_mode) -lt 1) { throw "Operations summary did not record human-mode silence." }
     if (($summaryAfter.handoff_reasons.explicit_human_request - $summaryBefore.handoff_reasons.explicit_human_request) -lt 1) { throw "Operations summary did not record explicit handoff." }
     if (($summaryAfter.handoff_reasons.knowledge_gap - $summaryBefore.handoff_reasons.knowledge_gap) -lt 1) { throw "Operations summary did not record the knowledge-gap handoff." }
 
-    $gapList = Invoke-OperationsJson -Method Get -Path "/v1/operations/gaps?status=pending&limit=200&offset=0"
-    $matchingGaps = @($gapList.items | Where-Object { $_.sample_question -like "*$testId*" })
-    if ($matchingGaps.Count -ne 1) { throw "Unknown question was not added to the knowledge-gap queue." }
-    if ([int]$matchingGaps[0].occurrence_count -ne 1) { throw "Knowledge-gap occurrence count is incorrect." }
+    $matchingGap = Wait-ForKnowledgeGap -ConversationId $gapConversationIdOne
+    if ([int]$matchingGap.occurrence_count -ne 1) { throw "Knowledge-gap occurrence count is incorrect." }
 
-    $updatedGap = Invoke-OperationsJson -Method Patch -Path "/v1/operations/gaps/$([int]$matchingGaps[0].id)" -Body @{
+    $updatedGap = Invoke-OperationsJson -Method Patch -Path "/v1/operations/gaps/$([int]$matchingGap.id)" -Body @{
         status = "resolved"
         note = "E2E verified knowledge maintenance workflow."
     }
