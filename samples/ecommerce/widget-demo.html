@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>星河优选｜在线客服演示</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: #172033;
+      background: #f4f7fb;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 20px clamp(20px, 6vw, 88px);
+      background: #fff;
+      border-bottom: 1px solid #e5eaf2;
+    }
+    .brand { font-size: 20px; font-weight: 750; letter-spacing: .04em; }
+    .status { color: #16794f; font-size: 14px; }
+    main {
+      width: min(1040px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: clamp(56px, 9vw, 112px) 0;
+      display: grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap: 40px;
+      align-items: start;
+    }
+    h1 { margin: 0 0 20px; font-size: clamp(36px, 6vw, 64px); line-height: 1.08; }
+    .lead { max-width: 640px; color: #526079; font-size: 18px; line-height: 1.8; }
+    .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; }
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 13px 18px;
+      background: #2563eb;
+      color: #fff;
+      font-size: 15px;
+      cursor: pointer;
+      box-shadow: 0 8px 22px rgba(37, 99, 235, .2);
+    }
+    button.secondary { background: #fff; color: #25324a; border: 1px solid #dce3ee; box-shadow: none; }
+    aside {
+      background: #fff;
+      border: 1px solid #e4e9f1;
+      border-radius: 20px;
+      padding: 28px;
+      box-shadow: 0 20px 60px rgba(23, 32, 51, .08);
+    }
+    aside h2 { margin: 0 0 18px; font-size: 18px; }
+    ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 14px; }
+    li { padding-bottom: 14px; color: #526079; border-bottom: 1px solid #edf0f5; line-height: 1.55; }
+    li:last-child { border-bottom: 0; padding-bottom: 0; }
+    .tag { display: inline-block; margin-right: 8px; color: #2563eb; font-weight: 700; }
+    @media (max-width: 760px) {
+      main { grid-template-columns: 1fr; padding-top: 52px; }
+      header { padding: 16px 20px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">星河优选</div>
+    <div class="status">● 客服系统在线</div>
+  </header>
+  <main>
+    <section>
+      <h1>有问题，直接问。</h1>
+      <p class="lead">
+        智能客服会依据星河优选的发货、运费、退货和退款政策回答；遇到投诉、支付安全或无法确定的问题，会在同一个聊天窗口转接人工客服。
+      </p>
+      <div class="actions">
+        <button type="button" data-open-chat>打开在线客服</button>
+        <button class="secondary" type="button" data-open-chat>测试“我要转人工”</button>
+      </div>
+    </section>
+    <aside>
+      <h2>可以试着询问</h2>
+      <ul>
+        <li><span class="tag">配送</span>现货下单后多久发货？</li>
+        <li><span class="tag">退货</span>签收五天还能无理由退货吗？</li>
+        <li><span class="tag">退款</span>退款一般多久到账？</li>
+        <li><span class="tag">人工</span>我要转人工客服。</li>
+      </ul>
+    </aside>
+  </main>
+
+  <script>
+    (function (d, t) {
+      const BASE_URL = "http://127.0.0.1:3000";
+      const script = d.createElement(t);
+      const firstScript = d.getElementsByTagName(t)[0];
+      script.src = BASE_URL + "/packs/js/sdk.js";
+      script.async = true;
+      firstScript.parentNode.insertBefore(script, firstScript);
+      script.onload = function () {
+        window.chatwootSDK.run({
+          websiteToken: "__CHATWOOT_WEBSITE_TOKEN__",
+          baseUrl: BASE_URL
+        });
+      };
+    })(document, "script");
+
+    document.querySelectorAll("[data-open-chat]").forEach(function (button) {
+      button.addEventListener("click", function () {
+        if (window.$chatwoot) window.$chatwoot.toggle("open");
+      });
+    });
+  </script>
+</body>
+</html>

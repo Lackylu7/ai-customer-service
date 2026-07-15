@@ -1,0 +1,12 @@
+.env
+!.env.example
+.venv/
+.runtime/
+.playwright-cli/
+.worktrees/
+data/
+artifacts/
+config/enterprise.local.json
+__pycache__/
+*.py[cod]
+*.log

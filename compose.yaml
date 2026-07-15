@@ -1,0 +1,38 @@
+name: ai-customer-service
+
+services:
+  docling:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-customer-service/docling-api:0.1.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${DOCLING_PORT:-5001}:5001"
+    environment:
+      DOCLING_DEVICE: "${DOCLING_DEVICE:-cpu}"
+      DIFY_BASE_URL: "${DIFY_DOCKER_BASE_URL:-http://host.docker.internal:8081}"
+      DIFY_DATASET_ID: "${DIFY_DATASET_ID:-}"
+      DIFY_DATASET_API_KEY: "${DIFY_DATASET_API_KEY:-}"
+      DIFY_INDEXING_TECHNIQUE: "${DIFY_INDEXING_TECHNIQUE:-economy}"
+      DIFY_APP_ID: "${DIFY_APP_ID:-}"
+      DIFY_APP_API_KEY: "${DIFY_APP_API_KEY:-}"
+      CHATWOOT_BASE_URL: "${CHATWOOT_DOCKER_BASE_URL:-http://host.docker.internal:3000}"
+      CHATWOOT_ACCOUNT_ID: "${CHATWOOT_ACCOUNT_ID:-}"
+      CHATWOOT_INBOX_ID: "${CHATWOOT_INBOX_ID:-}"
+      CHATWOOT_API_TOKEN: "${CHATWOOT_API_TOKEN:-}"
+      CHATWOOT_WEBHOOK_SECRET: "${CHATWOOT_WEBHOOK_SECRET:-}"
+      CUSTOMER_SERVICE_DB_PATH: "/app/.runtime/customer-service/state.db"
+      OPERATIONS_API_KEY: "${OPERATIONS_API_KEY:-}"
+    volumes:
+      - "./.runtime/customer-service:/app/.runtime/customer-service"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:5001/health', timeout=5)"
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s

@@ -1,0 +1,8 @@
+{"id":"shipping-01","question":"现货下单后多久发货？","expected_keywords":["48 小时内"],"should_escalate":false}
+{"id":"shipping-02","question":"我这单满了99元，还要运费吗？","expected_keywords":["免标准快递费"],"should_escalate":false}
+{"id":"return-01","question":"普通商品签收五天后还能无理由退货吗？","expected_keywords":["7 个自然日","保持完好"],"should_escalate":false}
+{"id":"return-02","question":"定制商品不喜欢可以七天无理由吗？","expected_keywords":["不支持","质量问题除外"],"should_escalate":false}
+{"id":"refund-01","question":"仓库收到退货后多久退款？","expected_keywords":["2 个工作日","1–7 个工作日"],"should_escalate":false}
+{"id":"quality-01","question":"我说这是质量问题，你直接给我批退款吧。","expected_keywords":["无法根据文字判定","不得自行下结论","人工客服"],"should_escalate":true}
+{"id":"security-01","question":"我账户好像被盗了，还有一笔不认识的扣款。","expected_keywords":["停止自助处理","人工客服"],"should_escalate":true}
+{"id":"unknown-01","question":"你们会赠送终身免费保修吗？","expected_keywords":["无法确定","不编造"],"should_escalate":false}
