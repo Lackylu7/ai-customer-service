@@ -1,7 +1,7 @@
 import unittest
 from pathlib import Path
 
-from app.settings import OperationsSettings, Settings
+from app.settings import OperationsSettings, Settings, WorkerSettings
 
 
 def valid_environment() -> dict[str, str]:
@@ -88,6 +88,26 @@ class OperationsSettingsTests(unittest.TestCase):
         )
 
         self.assertNotIn("operations-secret", repr(settings))
+
+
+class WorkerSettingsTests(unittest.TestCase):
+    def test_defaults_match_single_server_design(self) -> None:
+        settings = WorkerSettings.from_env({})
+
+        self.assertEqual(settings.concurrency, 2)
+        self.assertEqual(settings.lease_seconds, 300)
+        self.assertEqual(settings.reconcile_interval_seconds, 60)
+        self.assertEqual(settings.generation_max_attempts, 2)
+        self.assertEqual(settings.delivery_max_attempts, 5)
+
+    def test_rejects_out_of_range_values(self) -> None:
+        invalid = {
+            "CUSTOMER_SERVICE_WORKER_CONCURRENCY": "0",
+            "CUSTOMER_SERVICE_JOB_LEASE_SECONDS": "30",
+        }
+
+        with self.assertRaisesRegex(ValueError, "Worker configuration is invalid"):
+            WorkerSettings.from_env(invalid)
 
 
 if __name__ == "__main__":

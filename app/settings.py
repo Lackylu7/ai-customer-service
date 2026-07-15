@@ -83,3 +83,50 @@ class OperationsSettings:
         if not database_path:
             raise ValueError("Operations configuration is invalid.")
         return cls(api_key=api_key, database_path=Path(database_path))
+
+
+@dataclass(frozen=True)
+class WorkerSettings:
+    concurrency: int
+    lease_seconds: int
+    reconcile_interval_seconds: int
+    generation_max_attempts: int
+    delivery_max_attempts: int
+
+    @classmethod
+    def from_env(
+        cls,
+        environ: Mapping[str, str] | None = None,
+    ) -> "WorkerSettings":
+        source = os.environ if environ is None else environ
+        try:
+            concurrency = int(source.get("CUSTOMER_SERVICE_WORKER_CONCURRENCY", "2").strip())
+            lease_seconds = int(source.get("CUSTOMER_SERVICE_JOB_LEASE_SECONDS", "300").strip())
+            reconcile_interval_seconds = int(
+                source.get("CUSTOMER_SERVICE_RECONCILE_INTERVAL_SECONDS", "60").strip()
+            )
+            generation_max_attempts = int(
+                source.get("CUSTOMER_SERVICE_GENERATION_MAX_ATTEMPTS", "2").strip()
+            )
+            delivery_max_attempts = int(
+                source.get("CUSTOMER_SERVICE_DELIVERY_MAX_ATTEMPTS", "5").strip()
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("Worker configuration is invalid.") from exc
+
+        if not (
+            1 <= concurrency <= 8
+            and 60 <= lease_seconds <= 3600
+            and 10 <= reconcile_interval_seconds <= 3600
+            and 1 <= generation_max_attempts <= 5
+            and 1 <= delivery_max_attempts <= 10
+        ):
+            raise ValueError("Worker configuration is invalid.")
+
+        return cls(
+            concurrency=concurrency,
+            lease_seconds=lease_seconds,
+            reconcile_interval_seconds=reconcile_interval_seconds,
+            generation_max_attempts=generation_max_attempts,
+            delivery_max_attempts=delivery_max_attempts,
+        )
