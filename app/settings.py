@@ -86,12 +86,70 @@ class OperationsSettings:
 
 
 @dataclass(frozen=True)
+class HandoffOperationsSettings:
+    chatwoot_base_url: str
+    chatwoot_account_id: int
+    chatwoot_api_token: str = field(repr=False)
+    database_path: Path
+    human_sla_seconds: int
+
+    @classmethod
+    def from_env(
+        cls,
+        environ: Mapping[str, str] | None = None,
+    ) -> "HandoffOperationsSettings":
+        source = os.environ if environ is None else environ
+        try:
+            chatwoot_base_url = source.get(
+                "CHATWOOT_BASE_URL",
+                "http://127.0.0.1:3000",
+            ).strip().rstrip("/")
+            chatwoot_account_id = int(
+                source.get("CHATWOOT_ACCOUNT_ID", "").strip()
+            )
+            chatwoot_api_token = source.get("CHATWOOT_API_TOKEN", "").strip()
+            database_path = Path(
+                source.get(
+                    "CUSTOMER_SERVICE_DB_PATH",
+                    ".runtime/customer-service/state.db",
+                ).strip()
+            )
+            human_sla_seconds = int(
+                source.get(
+                    "CUSTOMER_SERVICE_HUMAN_SLA_SECONDS",
+                    "300",
+                ).strip()
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Human handoff operations configuration is invalid."
+            ) from exc
+        if (
+            not chatwoot_base_url
+            or chatwoot_account_id <= 0
+            or not chatwoot_api_token
+            or not str(database_path)
+            or not 1 <= human_sla_seconds <= 86_400
+        ):
+            raise ValueError("Human handoff operations configuration is invalid.")
+        return cls(
+            chatwoot_base_url=chatwoot_base_url,
+            chatwoot_account_id=chatwoot_account_id,
+            chatwoot_api_token=chatwoot_api_token,
+            database_path=database_path,
+            human_sla_seconds=human_sla_seconds,
+        )
+
+
+@dataclass(frozen=True)
 class WorkerSettings:
     concurrency: int
     lease_seconds: int
     reconcile_interval_seconds: int
     generation_max_attempts: int
     delivery_max_attempts: int
+    human_sla_seconds: int
+    human_fallback_cooldown_seconds: int
 
     @classmethod
     def from_env(
@@ -111,6 +169,18 @@ class WorkerSettings:
             delivery_max_attempts = int(
                 source.get("CUSTOMER_SERVICE_DELIVERY_MAX_ATTEMPTS", "5").strip()
             )
+            human_sla_seconds = int(
+                source.get(
+                    "CUSTOMER_SERVICE_HUMAN_SLA_SECONDS",
+                    "300",
+                ).strip()
+            )
+            human_fallback_cooldown_seconds = int(
+                source.get(
+                    "CUSTOMER_SERVICE_HUMAN_FALLBACK_COOLDOWN_SECONDS",
+                    "300",
+                ).strip()
+            )
         except (AttributeError, TypeError, ValueError) as exc:
             raise ValueError("Worker configuration is invalid.") from exc
 
@@ -120,6 +190,8 @@ class WorkerSettings:
             and 10 <= reconcile_interval_seconds <= 3600
             and 1 <= generation_max_attempts <= 5
             and 1 <= delivery_max_attempts <= 10
+            and 1 <= human_sla_seconds <= 86_400
+            and 1 <= human_fallback_cooldown_seconds <= 86_400
         ):
             raise ValueError("Worker configuration is invalid.")
 
@@ -129,4 +201,6 @@ class WorkerSettings:
             reconcile_interval_seconds=reconcile_interval_seconds,
             generation_max_attempts=generation_max_attempts,
             delivery_max_attempts=delivery_max_attempts,
+            human_sla_seconds=human_sla_seconds,
+            human_fallback_cooldown_seconds=human_fallback_cooldown_seconds,
         )

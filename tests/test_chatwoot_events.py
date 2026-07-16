@@ -3,7 +3,9 @@ import hmac
 import unittest
 
 from app.chatwoot_events import (
+    HumanReply,
     IncomingMessage,
+    parse_human_reply,
     parse_incoming_message,
     verify_webhook_signature,
 )
@@ -89,6 +91,69 @@ class ChatwootEventParsingTests(unittest.TestCase):
                 labels=("vip", "售后"),
             ),
         )
+
+    def test_parses_event_time_and_public_human_reply(self) -> None:
+        incoming = incoming_payload()
+        incoming["created_at"] = 1_720_958_390
+
+        parsed_incoming = parse_incoming_message(incoming)
+
+        self.assertIsNotNone(parsed_incoming)
+        assert parsed_incoming is not None
+        self.assertEqual(parsed_incoming.created_at, 1_720_958_390)
+
+        outgoing = incoming_payload()
+        outgoing.update(
+            {
+                "id": 102,
+                "message_type": "outgoing",
+                "created_at": 1_720_958_400,
+                "sender": {"id": 7, "type": "User"},
+            }
+        )
+
+        self.assertEqual(
+            parse_human_reply(
+                outgoing,
+                fallback_created_at=1_720_958_401,
+            ),
+            HumanReply(
+                message_id=102,
+                account_id=1,
+                conversation_id=42,
+                created_at=1_720_958_400,
+            ),
+        )
+
+    def test_ignores_ai_private_bot_and_non_text_outgoing_messages(self) -> None:
+        base = incoming_payload()
+        base.update(
+            {
+                "message_type": "outgoing",
+                "created_at": 1_720_958_400,
+                "sender": {"id": 7, "type": "User"},
+            }
+        )
+        variants = []
+        for changes in (
+            {"source_id": "ai-cs:101:reply"},
+            {"private": True},
+            {"sender": {"id": 7, "type": "AgentBot"}},
+            {"event": "conversation_updated"},
+            {"content_type": "input_select"},
+        ):
+            value = dict(base)
+            value.update(changes)
+            variants.append(value)
+
+        for value in variants:
+            with self.subTest(payload=value):
+                self.assertIsNone(
+                    parse_human_reply(
+                        value,
+                        fallback_created_at=1_720_958_401,
+                    )
+                )
 
     def test_ignores_events_that_must_not_trigger_ai(self) -> None:
         variants = []

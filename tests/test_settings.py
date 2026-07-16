@@ -1,7 +1,12 @@
 import unittest
 from pathlib import Path
 
-from app.settings import OperationsSettings, Settings, WorkerSettings
+from app.settings import (
+    HandoffOperationsSettings,
+    OperationsSettings,
+    Settings,
+    WorkerSettings,
+)
 
 
 def valid_environment() -> dict[str, str]:
@@ -99,6 +104,8 @@ class WorkerSettingsTests(unittest.TestCase):
         self.assertEqual(settings.reconcile_interval_seconds, 60)
         self.assertEqual(settings.generation_max_attempts, 2)
         self.assertEqual(settings.delivery_max_attempts, 5)
+        self.assertEqual(settings.human_sla_seconds, 300)
+        self.assertEqual(settings.human_fallback_cooldown_seconds, 300)
 
     def test_rejects_out_of_range_values(self) -> None:
         invalid = {
@@ -108,6 +115,51 @@ class WorkerSettingsTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Worker configuration is invalid"):
             WorkerSettings.from_env(invalid)
+
+    def test_loads_short_human_sla_for_automated_acceptance(self) -> None:
+        settings = WorkerSettings.from_env(
+            {
+                "CUSTOMER_SERVICE_HUMAN_SLA_SECONDS": "3",
+                "CUSTOMER_SERVICE_HUMAN_FALLBACK_COOLDOWN_SECONDS": "7",
+            }
+        )
+
+        self.assertEqual(settings.human_sla_seconds, 3)
+        self.assertEqual(settings.human_fallback_cooldown_seconds, 7)
+
+
+class HandoffOperationsSettingsTests(unittest.TestCase):
+    def test_loads_only_chatwoot_control_and_sla_values(self) -> None:
+        settings = HandoffOperationsSettings.from_env(
+            {
+                "CHATWOOT_BASE_URL": " http://127.0.0.1:3000/ ",
+                "CHATWOOT_ACCOUNT_ID": "1",
+                "CHATWOOT_API_TOKEN": "control-secret",
+                "CUSTOMER_SERVICE_DB_PATH": "data/state.db",
+                "CUSTOMER_SERVICE_HUMAN_SLA_SECONDS": "300",
+            }
+        )
+
+        self.assertEqual(settings.chatwoot_base_url, "http://127.0.0.1:3000")
+        self.assertEqual(settings.chatwoot_account_id, 1)
+        self.assertEqual(settings.database_path, Path("data/state.db"))
+        self.assertEqual(settings.human_sla_seconds, 300)
+        self.assertNotIn("control-secret", repr(settings))
+
+    def test_rejects_missing_control_token_or_invalid_sla(self) -> None:
+        environment = {
+            "CHATWOOT_BASE_URL": "http://127.0.0.1:3000",
+            "CHATWOOT_ACCOUNT_ID": "1",
+            "CHATWOOT_API_TOKEN": "",
+            "CUSTOMER_SERVICE_DB_PATH": "data/state.db",
+            "CUSTOMER_SERVICE_HUMAN_SLA_SECONDS": "0",
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "Human handoff operations configuration is invalid",
+        ):
+            HandoffOperationsSettings.from_env(environment)
 
 
 if __name__ == "__main__":
