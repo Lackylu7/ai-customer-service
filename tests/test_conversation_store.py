@@ -1,7 +1,10 @@
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
+from app.chatwoot_events import IncomingMessage
 from app.conversation_store import ConversationState, SQLiteConversationStore
 
 
@@ -58,6 +61,59 @@ class SQLiteConversationStoreTests(unittest.TestCase):
                 mode="human",
             ),
         )
+
+    def test_existing_conversation_schema_is_migrated_without_losing_state(self) -> None:
+        legacy_path = Path(self.temp_dir.name) / "legacy.db"
+        with closing(sqlite3.connect(legacy_path)) as connection:
+            connection.executescript(
+                """
+                CREATE TABLE conversation_states (
+                    conversation_id INTEGER PRIMARY KEY,
+                    dify_conversation_id TEXT,
+                    mode TEXT NOT NULL,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+                INSERT INTO conversation_states (
+                    conversation_id, dify_conversation_id, mode
+                ) VALUES (42, 'dify-old', 'human');
+                """
+            )
+            connection.commit()
+
+        migrated = SQLiteConversationStore(legacy_path).get_conversation(42)
+
+        self.assertIsNotNone(migrated)
+        assert migrated is not None
+        self.assertEqual(migrated.mode, "human")
+        self.assertEqual(migrated.dify_conversation_id, "dify-old")
+        self.assertIsNone(migrated.last_human_reply_at)
+        self.assertIsNone(migrated.ai_resume_cutoff_message_id)
+
+    def test_save_handoff_records_reason_and_trigger_message(self) -> None:
+        message = IncomingMessage(
+            message_id=101,
+            account_id=1,
+            conversation_id=42,
+            sender_id=9,
+            content="我要人工",
+            labels=(),
+            created_at=1_000,
+        )
+
+        self.store.save_handoff(
+            message,
+            "explicit_human_request",
+            now=1_001,
+        )
+
+        state = self.store.get_conversation(42)
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual(state.mode, "human")
+        self.assertEqual(state.handoff_reason, "explicit_human_request")
+        self.assertEqual(state.human_since, 1_001)
+        self.assertEqual(state.last_customer_message_id, 101)
+        self.assertEqual(state.last_customer_message_at, 1_000)
 
     def test_rejects_invalid_identifiers_and_mode(self) -> None:
         with self.assertRaises(ValueError):

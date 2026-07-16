@@ -148,8 +148,8 @@ class WorkerSettings:
     reconcile_interval_seconds: int
     generation_max_attempts: int
     delivery_max_attempts: int
-    human_sla_seconds: int
-    human_fallback_cooldown_seconds: int
+    human_sla_seconds: int = 300
+    human_fallback_cooldown_seconds: int = 300
 
     @classmethod
     def from_env(

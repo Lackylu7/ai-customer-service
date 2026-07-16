@@ -7,16 +7,19 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal, cast
 
-from app.chatwoot_events import IncomingMessage
+from app.chatwoot_events import HumanReply, IncomingMessage
 from app.job_models import (
+    ClaimedFromStage,
     Decision,
     DurableJob,
     EnqueueResult,
+    JobKind,
     JobStage,
     PreparedAction,
     QueueMetrics,
     ResumeStage,
 )
+from app.handoff_schema import ensure_handoff_schema
 from app.operations_models import Outcome, Reason
 
 
@@ -37,6 +40,9 @@ class SQLiteJobStore:
         now: int | None = None,
     ) -> EnqueueResult:
         created_at = int(time.time()) if now is None else now
+        message_created_at = (
+            message.created_at if message.created_at > 0 else created_at
+        )
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             completed = connection.execute(
@@ -60,11 +66,13 @@ class SQLiteJobStore:
                     content,
                     labels_json,
                     stage,
+                    job_kind,
                     outgoing_source_id,
+                    message_created_at,
                     available_at,
                     created_at,
                     updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, 'queued', 'standard', ?, ?, ?, ?, ?)
                 """,
                 (
                     message.message_id,
@@ -74,6 +82,7 @@ class SQLiteJobStore:
                     message.content,
                     json.dumps(message.labels, ensure_ascii=False),
                     f"ai-cs:{message.message_id}:reply",
+                    message_created_at,
                     created_at,
                     created_at,
                     created_at,
@@ -96,9 +105,11 @@ class SQLiteJobStore:
             connection.execute("BEGIN IMMEDIATE")
             candidate = connection.execute(
                 """
-                SELECT j.id, j.stage, j.resume_stage
+                SELECT j.id, j.stage, j.resume_stage, j.job_kind
                 FROM inbound_jobs AS j
-                WHERE j.stage IN ('queued', 'ready_to_deliver', 'retry_wait')
+                WHERE j.stage IN (
+                    'queued', 'human_wait', 'ready_to_deliver', 'retry_wait'
+                )
                   AND j.available_at <= ?
                   AND (j.stage != 'retry_wait' OR j.resume_stage IS NOT NULL)
                   AND NOT EXISTS (
@@ -117,7 +128,7 @@ class SQLiteJobStore:
                 return None
 
             source_stage = candidate["stage"]
-            if source_stage == "queued":
+            if source_stage in {"queued", "human_wait"}:
                 claimed_stage: ResumeStage = "generating"
             elif source_stage == "ready_to_deliver":
                 claimed_stage = "delivering"
@@ -128,7 +139,10 @@ class SQLiteJobStore:
                 """
                 UPDATE inbound_jobs
                 SET stage = ?,
-                    generation_attempts = generation_attempts + CASE WHEN ? = 'generating' THEN 1 ELSE 0 END,
+                    generation_attempts = generation_attempts + CASE
+                        WHEN ? = 'generating' AND job_kind = 'standard' THEN 1
+                        ELSE 0
+                    END,
                     delivery_attempts = delivery_attempts + CASE WHEN ? = 'delivering' THEN 1 ELSE 0 END,
                     locked_at = ?,
                     locked_by = ?,
@@ -149,7 +163,285 @@ class SQLiteJobStore:
                 "SELECT * FROM inbound_jobs WHERE id = ?",
                 (candidate["id"],),
             ).fetchone()
-        return self._row_to_job(row)
+        return self._row_to_job(
+            row,
+            claimed_from_stage=cast(ClaimedFromStage, source_stage),
+        )
+
+    def defer_human_wait(
+        self,
+        job_id: int,
+        *,
+        available_at: int,
+        now: int,
+    ) -> bool:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT j.message_id, j.message_created_at, c.mode,
+                       c.last_human_reply_at, c.last_human_reply_message_id
+                FROM inbound_jobs AS j
+                LEFT JOIN conversation_states AS c
+                  ON c.conversation_id = j.conversation_id
+                WHERE j.id = ? AND j.stage = 'generating'
+                """,
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Job {job_id} cannot make this transition.")
+            replied = _event_not_before(
+                row["last_human_reply_at"],
+                row["last_human_reply_message_id"],
+                int(row["message_created_at"]),
+                int(row["message_id"]),
+            )
+            if row["mode"] != "human" or replied:
+                self._complete_row(connection, job_id, now=now)
+                return False
+            cursor = connection.execute(
+                """
+                UPDATE inbound_jobs
+                SET stage = 'human_wait',
+                    job_kind = 'human_pending',
+                    outgoing_source_id =
+                        'ai-cs:' || message_id || ':human-fallback',
+                    available_at = ?,
+                    locked_at = NULL,
+                    locked_by = NULL,
+                    updated_at = ?
+                WHERE id = ? AND stage = 'generating'
+                """,
+                (available_at, now, job_id),
+            )
+            self._require_transition(cursor, job_id)
+            return True
+
+    def record_human_reply(
+        self,
+        reply: HumanReply,
+        *,
+        now: int | None = None,
+    ) -> int:
+        timestamp = int(time.time()) if now is None else now
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            state = connection.execute(
+                """
+                SELECT mode, last_human_reply_at, last_human_reply_message_id
+                FROM conversation_states
+                WHERE conversation_id = ?
+                """,
+                (reply.conversation_id,),
+            ).fetchone()
+            if state is None or state["mode"] != "human":
+                return 0
+            current = (
+                None
+                if state["last_human_reply_at"] is None
+                or state["last_human_reply_message_id"] is None
+                else (
+                    int(state["last_human_reply_at"]),
+                    int(state["last_human_reply_message_id"]),
+                )
+            )
+            incoming = (reply.created_at, reply.message_id)
+            if current is None or incoming > current:
+                connection.execute(
+                    """
+                    UPDATE conversation_states
+                    SET last_human_reply_at = ?,
+                        last_human_reply_message_id = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE conversation_id = ? AND mode = 'human'
+                    """,
+                    (
+                        reply.created_at,
+                        reply.message_id,
+                        reply.conversation_id,
+                    ),
+                )
+            rows = connection.execute(
+                """
+                SELECT id, message_id, message_created_at
+                FROM inbound_jobs
+                WHERE conversation_id = ?
+                  AND job_kind != 'standard'
+                  AND stage IN (
+                      'human_wait', 'generating',
+                      'ready_to_deliver', 'retry_wait'
+                  )
+                """,
+                (reply.conversation_id,),
+            ).fetchall()
+            cancelled = 0
+            for row in rows:
+                if (
+                    int(row["message_created_at"]),
+                    int(row["message_id"]),
+                ) <= incoming:
+                    self._complete_row(connection, int(row["id"]), now=timestamp)
+                    cancelled += 1
+            return cancelled
+
+    def confirm_human_fallback(
+        self,
+        job_id: int,
+        *,
+        cooldown_seconds: int,
+        now: int,
+    ) -> bool:
+        if cooldown_seconds <= 0:
+            raise ValueError("Fallback cooldown must be positive.")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._fallback_state(connection, job_id, stage="generating")
+            eligible = (
+                row is not None
+                and row["mode"] == "human"
+                and not _event_not_before(
+                    row["last_human_reply_at"],
+                    row["last_human_reply_message_id"],
+                    int(row["message_created_at"]),
+                    int(row["message_id"]),
+                )
+                and (
+                    row["last_fallback_at"] is None
+                    or int(row["last_fallback_at"]) <= now - cooldown_seconds
+                )
+            )
+            if row is None:
+                raise ValueError(f"Job {job_id} cannot make this transition.")
+            if not eligible:
+                self._complete_row(connection, job_id, now=now)
+            return eligible
+
+    def save_human_fallback_prepared(
+        self,
+        job_id: int,
+        action: PreparedAction,
+        *,
+        job_kind: Literal["human_timeout_reply", "human_wait_notice"],
+        processing_duration_ms: int,
+        now: int,
+    ) -> bool:
+        if job_kind not in {"human_timeout_reply", "human_wait_notice"}:
+            raise ValueError("Human fallback job kind is invalid.")
+        if processing_duration_ms < 0:
+            raise ValueError("Processing duration cannot be negative.")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._fallback_state(connection, job_id, stage="generating")
+            if row is None:
+                raise ValueError(f"Job {job_id} cannot make this transition.")
+            if row["mode"] != "human" or _event_not_before(
+                row["last_human_reply_at"],
+                row["last_human_reply_message_id"],
+                int(row["message_created_at"]),
+                int(row["message_id"]),
+            ):
+                self._complete_row(connection, job_id, now=now)
+                return False
+            cursor = connection.execute(
+                """
+                UPDATE inbound_jobs
+                SET stage = 'ready_to_deliver',
+                    resume_stage = NULL,
+                    job_kind = ?,
+                    decision = ?,
+                    outcome = ?,
+                    reply_text = ?,
+                    dify_conversation_id = ?,
+                    reason = ?,
+                    record_knowledge_gap = ?,
+                    processing_duration_ms = ?,
+                    locked_at = NULL,
+                    locked_by = NULL,
+                    last_error_code = NULL,
+                    available_at = ?,
+                    updated_at = ?
+                WHERE id = ?
+                  AND stage = 'generating'
+                  AND job_kind = 'human_pending'
+                """,
+                (
+                    job_kind,
+                    action.decision,
+                    action.outcome,
+                    action.customer_text,
+                    action.dify_conversation_id,
+                    action.reason,
+                    int(action.record_knowledge_gap),
+                    processing_duration_ms,
+                    now,
+                    now,
+                    job_id,
+                ),
+            )
+            self._require_transition(cursor, job_id)
+            return True
+
+    def can_deliver_human_fallback(
+        self,
+        job_id: int,
+        *,
+        now: int,
+    ) -> bool:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._fallback_state(connection, job_id, stage="delivering")
+            if row is None:
+                raise ValueError(f"Job {job_id} cannot make this transition.")
+            eligible = row["mode"] == "human" and not _event_not_before(
+                row["last_human_reply_at"],
+                row["last_human_reply_message_id"],
+                int(row["message_created_at"]),
+                int(row["message_id"]),
+            )
+            if not eligible:
+                self._complete_row(connection, job_id, now=now)
+            return eligible
+
+    def complete_human_fallback(self, job_id: int, *, now: int) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT conversation_id, job_kind
+                FROM inbound_jobs
+                WHERE id = ?
+                  AND stage = 'delivering'
+                  AND job_kind IN (
+                      'human_timeout_reply', 'human_wait_notice'
+                  )
+                """,
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Job {job_id} cannot make this transition.")
+            connection.execute(
+                """
+                UPDATE conversation_states
+                SET last_fallback_at = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE conversation_id = ? AND mode = 'human'
+                """,
+                (now, row["conversation_id"]),
+            )
+            connection.execute(
+                """
+                INSERT INTO conversation_control_events (
+                    conversation_id, action, result, error_code, created_at
+                ) VALUES (?, ?, 'succeeded', NULL, ?)
+                """,
+                (row["conversation_id"], row["job_kind"], now),
+            )
+            self._complete_row(connection, job_id, now=now)
+
+    def complete_without_delivery(self, job_id: int, *, now: int) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._complete_row(connection, job_id, now=now)
 
     def save_prepared(
         self,
@@ -325,11 +617,17 @@ class SQLiteJobStore:
             row = connection.execute(
                 """
                 SELECT
-                    COALESCE(SUM(CASE WHEN stage = 'queued' THEN 1 ELSE 0 END), 0) AS queued,
+                    COALESCE(SUM(CASE
+                        WHEN stage IN ('queued', 'human_wait') THEN 1
+                        ELSE 0
+                    END), 0) AS queued,
                     COALESCE(SUM(CASE WHEN stage IN ('generating', 'delivering') THEN 1 ELSE 0 END), 0) AS processing,
                     COALESCE(SUM(CASE WHEN stage = 'retry_wait' THEN 1 ELSE 0 END), 0) AS retry_wait,
                     COALESCE(SUM(CASE WHEN stage = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
-                    MIN(CASE WHEN stage IN ('queued', 'retry_wait') THEN created_at END) AS oldest_wait_at
+                    MIN(CASE
+                        WHEN stage IN ('queued', 'human_wait', 'retry_wait')
+                        THEN created_at
+                    END) AS oldest_wait_at
                 FROM inbound_jobs
                 """
             ).fetchone()
@@ -471,10 +769,16 @@ class SQLiteJobStore:
                     content TEXT NOT NULL,
                     labels_json TEXT NOT NULL DEFAULT '[]',
                     stage TEXT NOT NULL CHECK(stage IN (
-                        'queued','generating','ready_to_deliver','delivering',
+                        'queued','generating','human_wait',
+                        'ready_to_deliver','delivering',
                         'retry_wait','completed','failed'
                     )),
                     resume_stage TEXT CHECK(resume_stage IN ('generating','delivering')),
+                    job_kind TEXT NOT NULL DEFAULT 'standard'
+                        CHECK(job_kind IN (
+                            'standard','human_pending',
+                            'human_timeout_reply','human_wait_notice'
+                        )),
                     decision TEXT CHECK(decision IN ('reply','handoff','ignore')),
                     outcome TEXT,
                     reply_text TEXT,
@@ -490,6 +794,7 @@ class SQLiteJobStore:
                     locked_at INTEGER,
                     locked_by TEXT,
                     last_error_code TEXT,
+                    message_created_at INTEGER NOT NULL,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 );
@@ -524,6 +829,130 @@ class SQLiteJobStore:
                 VALUES ('readiness_probe', 0);
                 """
             )
+            ensure_handoff_schema(connection)
+            self._migrate_inbound_jobs_for_handoff(connection)
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_inbound_jobs_ready
+                ON inbound_jobs(stage, available_at, id)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_inbound_jobs_conversation
+                ON inbound_jobs(conversation_id, id, stage)
+                """
+            )
+
+    def _migrate_inbound_jobs_for_handoff(
+        self,
+        connection: sqlite3.Connection,
+    ) -> None:
+        table_sql_row = connection.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'inbound_jobs'
+            """
+        ).fetchone()
+        if table_sql_row is None:
+            return
+        columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(inbound_jobs)")
+        }
+        table_sql = str(table_sql_row[0] or "")
+        if (
+            "'human_wait'" in table_sql
+            and "message_created_at" in columns
+            and "job_kind" in columns
+        ):
+            return
+
+        if connection.in_transaction:
+            connection.commit()
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DROP INDEX IF EXISTS idx_inbound_jobs_ready")
+        connection.execute("DROP INDEX IF EXISTS idx_inbound_jobs_conversation")
+        connection.execute("ALTER TABLE inbound_jobs RENAME TO inbound_jobs_v1")
+        connection.execute(
+            """
+            CREATE TABLE inbound_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id INTEGER NOT NULL UNIQUE,
+                account_id INTEGER NOT NULL,
+                conversation_id INTEGER NOT NULL,
+                sender_id INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                labels_json TEXT NOT NULL DEFAULT '[]',
+                stage TEXT NOT NULL CHECK(stage IN (
+                    'queued','generating','human_wait',
+                    'ready_to_deliver','delivering',
+                    'retry_wait','completed','failed'
+                )),
+                resume_stage TEXT CHECK(resume_stage IN (
+                    'generating','delivering'
+                )),
+                job_kind TEXT NOT NULL DEFAULT 'standard'
+                    CHECK(job_kind IN (
+                        'standard','human_pending',
+                        'human_timeout_reply','human_wait_notice'
+                    )),
+                decision TEXT CHECK(decision IN ('reply','handoff','ignore')),
+                outcome TEXT,
+                reply_text TEXT,
+                dify_conversation_id TEXT,
+                reason TEXT,
+                record_knowledge_gap INTEGER NOT NULL DEFAULT 0
+                    CHECK(record_knowledge_gap IN (0,1)),
+                outgoing_source_id TEXT NOT NULL,
+                generation_attempts INTEGER NOT NULL DEFAULT 0,
+                delivery_attempts INTEGER NOT NULL DEFAULT 0,
+                processing_duration_ms INTEGER NOT NULL DEFAULT 0,
+                available_at INTEGER NOT NULL,
+                locked_at INTEGER,
+                locked_by TEXT,
+                last_error_code TEXT,
+                message_created_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO inbound_jobs (
+                id, message_id, account_id, conversation_id, sender_id,
+                content, labels_json, stage, resume_stage, job_kind,
+                decision, outcome, reply_text, dify_conversation_id, reason,
+                record_knowledge_gap, outgoing_source_id,
+                generation_attempts, delivery_attempts,
+                processing_duration_ms, available_at, locked_at, locked_by,
+                last_error_code, message_created_at, created_at, updated_at
+            )
+            SELECT id, message_id, account_id, conversation_id, sender_id,
+                   content, labels_json, stage, resume_stage, 'standard',
+                   decision, outcome, reply_text, dify_conversation_id, reason,
+                   record_knowledge_gap, outgoing_source_id,
+                   generation_attempts, delivery_attempts,
+                   processing_duration_ms, available_at, locked_at, locked_by,
+                   last_error_code, created_at, created_at, updated_at
+            FROM inbound_jobs_v1
+            """
+        )
+        connection.execute("DROP TABLE inbound_jobs_v1")
+        connection.execute(
+            """
+            CREATE INDEX idx_inbound_jobs_ready
+            ON inbound_jobs(stage, available_at, id)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX idx_inbound_jobs_conversation
+            ON inbound_jobs(conversation_id, id, stage)
+            """
+        )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -549,8 +978,71 @@ class SQLiteJobStore:
         if cursor.rowcount != 1:
             raise ValueError(f"Job {job_id} cannot make this transition.")
 
+    def _fallback_state(
+        self,
+        connection: sqlite3.Connection,
+        job_id: int,
+        *,
+        stage: Literal["generating", "delivering"],
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT j.message_id, j.message_created_at, j.stage, j.job_kind,
+                   c.mode, c.last_human_reply_at,
+                   c.last_human_reply_message_id, c.last_fallback_at
+            FROM inbound_jobs AS j
+            JOIN conversation_states AS c
+              ON c.conversation_id = j.conversation_id
+            WHERE j.id = ?
+              AND j.stage = ?
+              AND j.job_kind != 'standard'
+            """,
+            (job_id, stage),
+        ).fetchone()
+
+    def _complete_row(
+        self,
+        connection: sqlite3.Connection,
+        job_id: int,
+        *,
+        now: int,
+    ) -> None:
+        row = connection.execute(
+            "SELECT message_id FROM inbound_jobs WHERE id = ?",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"Job {job_id} was not found.")
+        connection.execute(
+            """
+            UPDATE inbound_jobs
+            SET stage = 'completed',
+                resume_stage = NULL,
+                locked_at = NULL,
+                locked_by = NULL,
+                last_error_code = NULL,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (now, job_id),
+        )
+        connection.execute(
+            """
+            INSERT INTO processed_messages (message_id, status, updated_at)
+            VALUES (?, 'completed', CURRENT_TIMESTAMP)
+            ON CONFLICT(message_id) DO UPDATE SET
+                status = 'completed',
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (row["message_id"],),
+        )
+
     @staticmethod
-    def _row_to_job(row: sqlite3.Row) -> DurableJob:
+    def _row_to_job(
+        row: sqlite3.Row,
+        *,
+        claimed_from_stage: ClaimedFromStage | None = None,
+    ) -> DurableJob:
         raw_labels = json.loads(row["labels_json"])
         labels = tuple(label for label in raw_labels if isinstance(label, str))
         action = SQLiteJobStore._row_to_action(row)
@@ -573,6 +1065,10 @@ class SQLiteJobStore:
             locked_at=None if row["locked_at"] is None else int(row["locked_at"]),
             locked_by=row["locked_by"],
             last_error_code=row["last_error_code"],
+            claimed_from_stage=claimed_from_stage,
+            message_created_at=int(row["message_created_at"]),
+            received_at=int(row["created_at"]),
+            job_kind=cast(JobKind, row["job_kind"]),
         )
 
     @staticmethod
@@ -587,3 +1083,14 @@ class SQLiteJobStore:
             reason=cast(Reason | None, row["reason"]),
             record_knowledge_gap=bool(row["record_knowledge_gap"]),
         )
+
+
+def _event_not_before(
+    candidate_at: object,
+    candidate_id: object,
+    target_at: int,
+    target_id: int,
+) -> bool:
+    if candidate_at is None or candidate_id is None:
+        return False
+    return (int(candidate_at), int(candidate_id)) >= (target_at, target_id)
