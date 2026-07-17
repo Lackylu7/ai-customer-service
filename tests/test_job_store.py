@@ -344,6 +344,55 @@ class SQLiteJobStoreTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(count, 0)
 
+    def test_enqueue_rejects_message_at_or_before_ai_resume_cutoff(self) -> None:
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO conversation_states (
+                    conversation_id, dify_conversation_id, mode,
+                    ai_resume_cutoff_message_id
+                ) VALUES (82, NULL, 'ai', 900)
+                """
+            )
+            connection.commit()
+
+        result = self.store.enqueue(
+            message(message_id=899, conversation_id=82, created_at=1_000),
+            now=1_100,
+        )
+
+        self.assertEqual((result.status, result.job_id), ("duplicate", None))
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            jobs = connection.execute(
+                "SELECT COUNT(*) FROM inbound_jobs WHERE conversation_id=82"
+            ).fetchone()[0]
+            processed = connection.execute(
+                "SELECT status FROM processed_messages WHERE message_id=899"
+            ).fetchone()
+        self.assertEqual(jobs, 0)
+        self.assertEqual(processed, ("completed",))
+
+    def test_enqueue_updates_latest_customer_activity_in_human_mode(self) -> None:
+        self._seed_human_conversation(83)
+
+        self.store.enqueue(
+            message(message_id=901, conversation_id=83, created_at=1_005),
+            now=1_100,
+        )
+        self.store.enqueue(
+            message(message_id=900, conversation_id=83, created_at=1_004),
+            now=1_101,
+        )
+
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            state = connection.execute(
+                """
+                SELECT last_customer_message_id, last_customer_message_at
+                FROM conversation_states WHERE conversation_id=83
+                """
+            ).fetchone()
+        self.assertEqual(state, (901, 1_005))
+
     def test_legacy_job_table_is_rebuilt_without_losing_jobs(self) -> None:
         legacy_path = Path(self.temp_dir.name) / "legacy-jobs.db"
         with closing(sqlite3.connect(legacy_path)) as connection:

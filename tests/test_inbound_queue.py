@@ -1,6 +1,6 @@
 import unittest
 
-from app.chatwoot_events import IncomingMessage
+from app.chatwoot_events import HumanReply, IncomingMessage
 from app.inbound_queue import InboundQueue
 from app.job_models import EnqueueResult
 
@@ -9,10 +9,15 @@ class FakeJobStore:
     def __init__(self, result: EnqueueResult) -> None:
         self.result = result
         self.messages: list[IncomingMessage] = []
+        self.human_replies: list[HumanReply] = []
 
     def enqueue(self, message: IncomingMessage) -> EnqueueResult:
         self.messages.append(message)
         return self.result
+
+    def record_human_reply(self, reply: HumanReply) -> int:
+        self.human_replies.append(reply)
+        return 1
 
 
 class FakeOperationsRecorder:
@@ -62,6 +67,22 @@ class InboundQueueTests(unittest.TestCase):
 
         self.assertEqual(result.status, "duplicate")
         self.assertEqual(store.messages, [incoming_message()])
+
+    def test_human_reply_is_persisted_without_operations_payload(self) -> None:
+        store = FakeJobStore(EnqueueResult(status="queued", job_id=1))
+        operations = FakeOperationsRecorder()
+        queue = InboundQueue(store, operations)
+        reply = HumanReply(
+            message_id=102,
+            account_id=1,
+            conversation_id=42,
+            created_at=1_000,
+        )
+
+        queue.record_human_reply(reply)
+
+        self.assertEqual(store.human_replies, [reply])
+        self.assertEqual(operations.events, [])
 
 
 if __name__ == "__main__":

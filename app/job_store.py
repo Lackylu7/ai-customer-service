@@ -56,6 +56,64 @@ class SQLiteJobStore:
             if completed is not None:
                 return EnqueueResult(status="duplicate", job_id=None)
 
+            state = connection.execute(
+                """
+                SELECT mode, ai_resume_cutoff_message_id,
+                       last_customer_message_at, last_customer_message_id
+                FROM conversation_states
+                WHERE conversation_id = ?
+                """,
+                (message.conversation_id,),
+            ).fetchone()
+            if (
+                state is not None
+                and state["ai_resume_cutoff_message_id"] is not None
+                and message.message_id
+                <= int(state["ai_resume_cutoff_message_id"])
+            ):
+                connection.execute(
+                    """
+                    INSERT INTO processed_messages (
+                        message_id, status, updated_at
+                    ) VALUES (?, 'completed', CURRENT_TIMESTAMP)
+                    ON CONFLICT(message_id) DO UPDATE SET
+                        status = 'completed',
+                        updated_at = CURRENT_TIMESTAMP
+                    """,
+                    (message.message_id,),
+                )
+                return EnqueueResult(status="duplicate", job_id=None)
+
+            if state is not None and state["mode"] == "human":
+                current_customer = (
+                    None
+                    if state["last_customer_message_at"] is None
+                    or state["last_customer_message_id"] is None
+                    else (
+                        int(state["last_customer_message_at"]),
+                        int(state["last_customer_message_id"]),
+                    )
+                )
+                incoming_customer = (message_created_at, message.message_id)
+                if (
+                    current_customer is None
+                    or incoming_customer > current_customer
+                ):
+                    connection.execute(
+                        """
+                        UPDATE conversation_states
+                        SET last_customer_message_at = ?,
+                            last_customer_message_id = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE conversation_id = ? AND mode = 'human'
+                        """,
+                        (
+                            message_created_at,
+                            message.message_id,
+                            message.conversation_id,
+                        ),
+                    )
+
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO inbound_jobs (

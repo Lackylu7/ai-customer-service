@@ -146,6 +146,7 @@ class ChatwootReconciler:
             sender_id=sender_id,
             content=content.strip(),
             labels=conversation.labels,
+            created_at=created_at,
         )
 
 

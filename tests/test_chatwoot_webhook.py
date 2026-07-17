@@ -15,7 +15,7 @@ warnings.filterwarnings(
 )
 from fastapi.testclient import TestClient
 
-from app.chatwoot_events import IncomingMessage
+from app.chatwoot_events import HumanReply, IncomingMessage
 from app.chatwoot_webhook import (
     WebhookAuthenticationError,
     WebhookPayloadError,
@@ -27,11 +27,15 @@ from app.job_models import EnqueueResult
 class FakeInboundQueue:
     def __init__(self) -> None:
         self.messages: list[IncomingMessage] = []
+        self.human_replies: list[HumanReply] = []
 
     def enqueue(self, message: IncomingMessage) -> EnqueueResult:
         self.messages.append(message)
         status = "queued" if len(self.messages) == 1 else "duplicate"
         return EnqueueResult(status=status, job_id=1 if status == "queued" else None)
+
+    def record_human_reply(self, reply: HumanReply) -> None:
+        self.human_replies.append(reply)
 
 
 def payload(message_type: str = "incoming") -> dict[str, object]:
@@ -42,6 +46,7 @@ def payload(message_type: str = "incoming") -> dict[str, object]:
         "message_type": message_type,
         "content_type": "text",
         "private": False,
+        "created_at": 1_720_958_390,
         "account": {"id": 1},
         "conversation": {"id": 42, "labels": []},
         "sender": {"id": 9, "type": "contact"},
@@ -101,12 +106,47 @@ class ChatwootWebhookProcessingTests(unittest.TestCase):
             self.process(raw_body, f"sha256={digest}")
 
     def test_ignored_event_does_not_enqueue(self) -> None:
-        raw_body, signature = encode_and_sign(payload("outgoing"))
+        value = payload("outgoing")
+        value["sender"] = {"id": 7, "type": "AgentBot"}
+        raw_body, signature = encode_and_sign(value)
 
         result = self.process(raw_body, signature)
 
         self.assertEqual(result.status, "ignored")
         self.assertEqual(self.queue.messages, [])
+
+    def test_public_user_outgoing_records_human_activity(self) -> None:
+        value = payload("outgoing")
+        value["id"] = 102
+        value["sender"] = {"id": 7, "type": "User"}
+        raw_body, signature = encode_and_sign(value)
+
+        result = self.process(raw_body, signature)
+
+        self.assertEqual(result.status, "human_activity")
+        self.assertEqual(self.queue.messages, [])
+        self.assertEqual(
+            self.queue.human_replies,
+            [
+                HumanReply(
+                    message_id=102,
+                    account_id=1,
+                    conversation_id=42,
+                    created_at=1_720_958_390,
+                )
+            ],
+        )
+
+    def test_ai_outgoing_is_not_recorded_as_human_activity(self) -> None:
+        value = payload("outgoing")
+        value["sender"] = {"id": 7, "type": "User"}
+        value["source_id"] = "ai-cs:101:human-fallback"
+        raw_body, signature = encode_and_sign(value)
+
+        result = self.process(raw_body, signature)
+
+        self.assertEqual(result.status, "ignored")
+        self.assertEqual(self.queue.human_replies, [])
 
     def test_valid_event_is_queued_once_and_then_reported_duplicate(self) -> None:
         raw_body, signature = encode_and_sign(payload())
@@ -192,6 +232,7 @@ class ChatwootWebhookRouteTests(unittest.TestCase):
                     sender_id=9,
                     content="现货多久发货？",
                     labels=(),
+                    created_at=1_720_958_390,
                 )
             ],
         )

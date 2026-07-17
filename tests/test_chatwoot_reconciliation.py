@@ -164,6 +164,7 @@ class ChatwootReconcilerTests(unittest.TestCase):
         self.assertEqual([item.message_id for item in queue.messages], [501, 504])
         self.assertEqual(queue.messages[0].account_id, 2)
         self.assertEqual(queue.messages[0].labels, ("vip",))
+        self.assertEqual(queue.messages[0].created_at, 701)
         self.assertEqual(chatwoot.list_calls, [(2, 1), (2, 2)])
         self.assertEqual(chatwoot.message_calls, [(2, 7)])
         self.assertEqual(store.get_reconciliation_cursor(), 1_060)

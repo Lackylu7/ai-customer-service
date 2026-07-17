@@ -1,6 +1,6 @@
 import logging
 
-from app.chatwoot_events import IncomingMessage
+from app.chatwoot_events import HumanReply, IncomingMessage
 from app.job_models import EnqueueResult
 from app.job_store import SQLiteJobStore
 from app.operations_models import OperationsRecorder
@@ -28,3 +28,6 @@ class InboundQueue:
                     exc_info=True,
                 )
         return result
+
+    def record_human_reply(self, reply: HumanReply) -> None:
+        self._store.record_human_reply(reply)
