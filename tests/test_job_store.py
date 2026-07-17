@@ -327,6 +327,68 @@ class SQLiteJobStoreTests(unittest.TestCase):
         self.assertEqual(state, ("human", 1_314))
         self.assertEqual(audit, ("human_timeout_reply", "succeeded", None))
 
+    def test_human_fallback_terminal_failure_records_sanitized_audit(self) -> None:
+        self._seed_human_conversation(47)
+        self.store.enqueue(
+            message(message_id=706, conversation_id=47, created_at=1_000),
+            now=1_010,
+        )
+        claimed = self.store.claim_next("worker-a", now=1_010, lease_seconds=300)
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        self.store.defer_human_wait(claimed.id, available_at=1_310, now=1_011)
+        due = self.store.claim_next("worker-a", now=1_310, lease_seconds=300)
+        self.assertIsNotNone(due)
+        assert due is not None
+        self.assertTrue(
+            self.store.confirm_human_fallback(
+                due.id,
+                cooldown_seconds=300,
+                now=1_310,
+            )
+        )
+        self.assertTrue(
+            self.store.save_human_fallback_prepared(
+                due.id,
+                PreparedAction.customer_message("人工客服暂时未能及时回复，请稍候。"),
+                job_kind="human_wait_notice",
+                processing_duration_ms=10,
+                now=1_311,
+            )
+        )
+        delivery = self.store.claim_next(
+            "worker-a",
+            now=1_312,
+            lease_seconds=300,
+        )
+        self.assertIsNotNone(delivery)
+        assert delivery is not None
+
+        self.store.fail(
+            delivery.id,
+            resume_stage="delivering",
+            error_code="chatwoot_auth_error",
+            now=1_313,
+        )
+
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            stage = connection.execute(
+                "SELECT stage FROM inbound_jobs WHERE id=?",
+                (delivery.id,),
+            ).fetchone()
+            audit = connection.execute(
+                """
+                SELECT action, result, error_code
+                FROM conversation_control_events
+                WHERE conversation_id=47
+                """
+            ).fetchone()
+        self.assertEqual(stage, ("failed",))
+        self.assertEqual(
+            audit,
+            ("human_wait_notice", "failed", "chatwoot_auth_error"),
+        )
+
     def test_completed_legacy_message_is_duplicate_without_job(self) -> None:
         with closing(sqlite3.connect(self.database_path)) as connection:
             connection.execute(

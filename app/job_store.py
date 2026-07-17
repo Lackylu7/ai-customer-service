@@ -616,6 +616,14 @@ class SQLiteJobStore:
     ) -> None:
         self._validate_error_code(error_code)
         with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT conversation_id, job_kind
+                FROM inbound_jobs
+                WHERE id = ? AND stage IN ('generating', 'delivering')
+                """,
+                (job_id,),
+            ).fetchone()
             cursor = connection.execute(
                 """
                 UPDATE inbound_jobs
@@ -630,6 +638,23 @@ class SQLiteJobStore:
                 (resume_stage, error_code, now, job_id),
             )
             self._require_transition(cursor, job_id)
+            if row is not None and row["job_kind"] in {
+                "human_timeout_reply",
+                "human_wait_notice",
+            }:
+                connection.execute(
+                    """
+                    INSERT INTO conversation_control_events (
+                        conversation_id, action, result, error_code, created_at
+                    ) VALUES (?, ?, 'failed', ?, ?)
+                    """,
+                    (
+                        row["conversation_id"],
+                        row["job_kind"],
+                        error_code,
+                        now,
+                    ),
+                )
 
     def recover_expired_leases(self, *, now: int, lease_seconds: int) -> int:
         if lease_seconds <= 0:

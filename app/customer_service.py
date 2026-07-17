@@ -21,6 +21,12 @@ from app.operations_models import (
 logger = logging.getLogger(__name__)
 
 
+_HUMAN_WAIT_TEXT = (
+    "人工客服暂时未能及时回复，我们已提醒工作人员，请稍候。"
+    "如涉及支付、账户或投诉问题，请不要发送密码、验证码等敏感信息。"
+)
+
+
 class HandoffLabelError(ChatwootAPIError):
     pass
 
@@ -48,6 +54,14 @@ class ConversationStore(Protocol):
         *,
         dify_conversation_id: str | None,
         mode: Literal["ai", "human"],
+    ) -> None: ...
+
+    def save_handoff(
+        self,
+        message: IncomingMessage,
+        reason: Reason,
+        *,
+        now: int | None = None,
     ) -> None: ...
 
 
@@ -89,6 +103,13 @@ class ChatwootPublisher(Protocol):
 @dataclass(frozen=True)
 class HandlingResult:
     status: HandlingStatus
+
+
+@dataclass(frozen=True)
+class HumanFallbackPreparation:
+    action: PreparedAction
+    job_kind: Literal["human_timeout_reply", "human_wait_notice"]
+    dify_used: bool
 
 
 class CustomerService:
@@ -182,6 +203,47 @@ class CustomerService:
     def dify_error_action(self) -> PreparedAction:
         return PreparedAction.handoff(self._DEFAULT_HANDOFF_TEXT, "dify_error")
 
+    def human_wait_text(self) -> str:
+        return _HUMAN_WAIT_TEXT
+
+    def prepare_human_fallback(
+        self,
+        message: IncomingMessage,
+    ) -> HumanFallbackPreparation:
+        if handoff_reason(message.content) is not None:
+            return HumanFallbackPreparation(
+                PreparedAction.customer_message(_HUMAN_WAIT_TEXT),
+                "human_wait_notice",
+                False,
+            )
+
+        response = self._dify.send_message(
+            query=message.content,
+            user=f"chatwoot:{message.sender_id}",
+            conversation_id=None,
+        )
+        parsed = parse_dify_answer(response.answer)
+        if parsed.needs_human:
+            return HumanFallbackPreparation(
+                PreparedAction.customer_message(
+                    _HUMAN_WAIT_TEXT,
+                    record_knowledge_gap=(
+                        response.answer.strip().upper().startswith("[HANDOFF]")
+                    ),
+                ),
+                "human_wait_notice",
+                True,
+            )
+
+        return HumanFallbackPreparation(
+            PreparedAction.customer_message(
+                f"AI 临时协助：{parsed.customer_text}\n\n"
+                "人工客服仍在接管本会话，如需进一步处理请稍候。"
+            ),
+            "human_timeout_reply",
+            True,
+        )
+
     def deliver(
         self,
         message: IncomingMessage,
@@ -219,10 +281,10 @@ class CustomerService:
                     exc.status_code,
                     "Chatwoot handoff label update failed.",
                 ) from exc
-            self._store.save_conversation(
-                message.conversation_id,
-                dify_conversation_id=None,
-                mode="human",
+            self._store.save_handoff(
+                message,
+                cast(Reason, action.reason),
+                now=int(time.time()),
             )
             return
 
@@ -231,6 +293,28 @@ class CustomerService:
             dify_conversation_id=action.dify_conversation_id,
             mode="ai",
         )
+
+    def deliver_human_fallback(
+        self,
+        message: IncomingMessage,
+        action: PreparedAction,
+        *,
+        source_id: str,
+    ) -> None:
+        if action.customer_text is None:
+            raise ValueError("Human fallback text is required.")
+        existing_message_id = self._chatwoot.find_outgoing_message_by_source_id(
+            message.account_id,
+            message.conversation_id,
+            source_id,
+        )
+        if existing_message_id is None:
+            self._chatwoot.send_outgoing_message(
+                message.account_id,
+                message.conversation_id,
+                action.customer_text,
+                source_id=source_id,
+            )
 
     def record_result(
         self,

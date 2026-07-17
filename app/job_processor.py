@@ -3,9 +3,13 @@ from collections.abc import Callable
 
 from app.chatwoot_client import ChatwootAPIError
 from app.chatwoot_events import IncomingMessage
-from app.customer_service import CustomerService, HandoffLabelError
+from app.customer_service import (
+    CustomerService,
+    HandoffLabelError,
+    HumanFallbackPreparation,
+)
 from app.dify_chat_client import DifyChatAPIError
-from app.job_models import DurableJob
+from app.job_models import DurableJob, PreparedAction
 from app.job_store import SQLiteJobStore
 from app.settings import WorkerSettings
 
@@ -45,6 +49,10 @@ class JobProcessor:
         raise ValueError(f"Job {job.id} is not in a processing stage.")
 
     def _process_generation(self, job: DurableJob) -> None:
+        if job.job_kind == "human_pending":
+            self._process_human_fallback_generation(job)
+            return
+
         message = _incoming_message(job)
         started_at = self._monotonic()
         try:
@@ -78,6 +86,14 @@ class JobProcessor:
             )
             return
 
+        if action.decision == "ignore":
+            self._store.defer_human_wait(
+                job.id,
+                available_at=job.received_at + self._settings.human_sla_seconds,
+                now=self._clock(),
+            )
+            return
+
         duration_ms = _duration_ms(started_at, self._monotonic())
         now = self._clock()
         self._store.save_prepared(
@@ -93,7 +109,85 @@ class JobProcessor:
             checked_at=now,
         )
 
+    def _process_human_fallback_generation(self, job: DurableJob) -> None:
+        now = self._clock()
+        if not self._store.confirm_human_fallback(
+            job.id,
+            cooldown_seconds=self._settings.human_fallback_cooldown_seconds,
+            now=now,
+        ):
+            return
+
+        message = _incoming_message(job)
+        started_at = self._monotonic()
+        try:
+            prepared = self._service.prepare_human_fallback(message)
+        except DifyChatAPIError as exc:
+            self._store.record_dependency_status(
+                "dify",
+                ok=False,
+                error_code=_dify_error_code(exc),
+                checked_at=now,
+            )
+            prepared = HumanFallbackPreparation(
+                PreparedAction.customer_message(self._service.human_wait_text()),
+                "human_wait_notice",
+                False,
+            )
+        else:
+            if prepared.dify_used:
+                self._store.record_dependency_status(
+                    "dify",
+                    ok=True,
+                    error_code=None,
+                    checked_at=now,
+                )
+
+        self._store.save_human_fallback_prepared(
+            job.id,
+            prepared.action,
+            job_kind=prepared.job_kind,
+            processing_duration_ms=_duration_ms(
+                started_at,
+                self._monotonic(),
+            ),
+            now=self._clock(),
+        )
+
     def _process_delivery(self, job: DurableJob) -> None:
+        if job.action is None:
+            raise ValueError(f"Job {job.id} has no prepared action.")
+        if job.job_kind != "standard":
+            self._process_human_fallback_delivery(job)
+            return
+        self._process_standard_delivery(job)
+
+    def _process_human_fallback_delivery(self, job: DurableJob) -> None:
+        if job.action is None:
+            raise ValueError(f"Job {job.id} has no prepared action.")
+        now = self._clock()
+        if not self._store.can_deliver_human_fallback(job.id, now=now):
+            return
+        try:
+            self._service.deliver_human_fallback(
+                _incoming_message(job),
+                job.action,
+                source_id=job.outgoing_source_id,
+            )
+        except ChatwootAPIError as exc:
+            self._handle_delivery_error(job, exc, _chatwoot_error_code(exc))
+            return
+
+        now = self._clock()
+        self._store.complete_human_fallback(job.id, now=now)
+        self._store.record_dependency_status(
+            "chatwoot",
+            ok=True,
+            error_code=None,
+            checked_at=now,
+        )
+
+    def _process_standard_delivery(self, job: DurableJob) -> None:
         if job.action is None:
             raise ValueError(f"Job {job.id} has no prepared action.")
         message = _incoming_message(job)
@@ -164,6 +258,7 @@ def _incoming_message(job: DurableJob) -> IncomingMessage:
         sender_id=job.sender_id,
         content=job.content,
         labels=job.labels,
+        created_at=job.message_created_at,
     )
 
 

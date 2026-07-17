@@ -118,6 +118,7 @@ def incoming(
     *,
     message_id: int = 101,
     conversation_id: int = 9,
+    created_at: int = 0,
 ) -> IncomingMessage:
     return IncomingMessage(
         message_id=message_id,
@@ -126,6 +127,7 @@ def incoming(
         sender_id=42,
         content=content,
         labels=("vip",),
+        created_at=created_at,
     )
 
 
@@ -182,6 +184,62 @@ class CustomerServiceTests(unittest.TestCase):
         self.assertIsNone(self.store.get_conversation(message.conversation_id))
         self.assertIsInstance(raised.exception.__cause__, ChatwootAPIError)
 
+    def test_high_risk_human_timeout_returns_wait_notice_without_dify(self) -> None:
+        prepared = self.service.prepare_human_fallback(
+            incoming("我要投诉并申请赔偿")
+        )
+
+        self.assertEqual(prepared.job_kind, "human_wait_notice")
+        self.assertIn("人工客服", prepared.action.customer_text)
+        self.assertEqual(self.dify.calls, [])
+        self.assertFalse(prepared.dify_used)
+
+    def test_grounded_human_timeout_returns_temporary_ai_reply(self) -> None:
+        self.dify.response = DifyChatResponse(
+            answer="现货商品 48 小时内发出。",
+            conversation_id="dify-2",
+            retriever_resources=({"document_name": "shipping.md"},),
+        )
+
+        prepared = self.service.prepare_human_fallback(incoming("多久发货"))
+
+        self.assertEqual(prepared.job_kind, "human_timeout_reply")
+        self.assertTrue(prepared.action.customer_text.startswith("AI 临时协助："))
+        self.assertIn("人工客服仍在接管", prepared.action.customer_text)
+        self.assertTrue(prepared.dify_used)
+
+    def test_knowledge_gap_human_timeout_returns_safe_wait_notice(self) -> None:
+        self.dify.response = DifyChatResponse(
+            answer="[HANDOFF] 暂无可靠资料。",
+            conversation_id="dify-2",
+            retriever_resources=(),
+        )
+
+        prepared = self.service.prepare_human_fallback(incoming("未知政策"))
+
+        self.assertEqual(prepared.job_kind, "human_wait_notice")
+        self.assertEqual(prepared.action.customer_text, self.service.human_wait_text())
+        self.assertTrue(prepared.action.record_knowledge_gap)
+        self.assertTrue(prepared.dify_used)
+
+    def test_human_fallback_delivery_keeps_conversation_in_human_mode(self) -> None:
+        message = incoming("多久发货")
+        self.store.save_handoff(message, "explicit_human_request", now=900)
+        action = PreparedAction.customer_message("AI 临时协助：48 小时内发货。")
+
+        self.service.deliver_human_fallback(
+            message,
+            action,
+            source_id="ai-cs:101:human-fallback",
+        )
+
+        self.assertEqual(self.chatwoot.sent_messages, [action.customer_text])
+        state = self.store.get_conversation(message.conversation_id)
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual(state.mode, "human")
+        self.assertEqual(state.handoff_reason, "explicit_human_request")
+
     def test_normal_answer_is_sent_and_conversation_is_saved(self) -> None:
         result = self.service.handle(incoming("现货多久发货？"))
 
@@ -236,7 +294,9 @@ class CustomerServiceTests(unittest.TestCase):
         self.assertEqual(self.operations.events[-1]["outcome"], "ignored_human_mode")
 
     def test_explicit_human_request_hands_off_without_dify(self) -> None:
-        result = self.service.handle(incoming("我要人工客服"))
+        result = self.service.handle(
+            incoming("我要人工客服", message_id=108, created_at=800)
+        )
 
         self.assertEqual(result.status, "handed_off")
         self.assertEqual(self.dify.calls, [])
@@ -245,7 +305,11 @@ class CustomerServiceTests(unittest.TestCase):
             ["正在为你转接人工客服，请稍候。"],
         )
         self.assertEqual(self.chatwoot.label_calls, ["ai_handoff"])
-        self.assertEqual(self.store.get_conversation(9).mode, "human")
+        state = self.store.get_conversation(9)
+        self.assertEqual(state.mode, "human")
+        self.assertEqual(state.handoff_reason, "explicit_human_request")
+        self.assertEqual(state.last_customer_message_id, 108)
+        self.assertEqual(state.last_customer_message_at, 800)
         self.assertEqual(self.operations.events[-1]["outcome"], "handed_off")
         self.assertEqual(
             self.operations.events[-1]["reason"],
