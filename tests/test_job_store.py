@@ -389,6 +389,190 @@ class SQLiteJobStoreTests(unittest.TestCase):
             ("human_wait_notice", "failed", "chatwoot_auth_error"),
         )
 
+    def test_resume_ai_transaction_completes_safe_jobs_and_sets_cutoff(self) -> None:
+        self._seed_human_conversation(48)
+        waiting_result = self.store.enqueue(
+            message(message_id=707, conversation_id=48, created_at=1_000),
+            now=1_010,
+        )
+        waiting = self.store.claim_next(
+            "worker-a",
+            now=1_010,
+            lease_seconds=300,
+        )
+        self.assertIsNotNone(waiting)
+        assert waiting is not None
+        self.store.defer_human_wait(waiting.id, available_at=1_310, now=1_011)
+        queued_result = self.store.enqueue(
+            message(message_id=708, conversation_id=48, created_at=1_020),
+            now=1_020,
+        )
+
+        self.assertEqual(self.store.get_resume_precheck(48), "ready")
+        status = self.store.resume_ai_transaction(
+            48,
+            cutoff_message_id=900,
+            now=2_000,
+        )
+
+        self.assertEqual(status, "resumed")
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            state = connection.execute(
+                """
+                SELECT mode, dify_conversation_id, handoff_reason, human_since,
+                       last_customer_message_id, last_customer_message_at,
+                       last_human_reply_message_id, last_human_reply_at,
+                       last_fallback_at, ai_resume_cutoff_message_id
+                FROM conversation_states WHERE conversation_id=48
+                """
+            ).fetchone()
+            jobs = connection.execute(
+                """
+                SELECT message_id, stage FROM inbound_jobs
+                WHERE conversation_id=48 ORDER BY message_id
+                """
+            ).fetchall()
+            processed = connection.execute(
+                """
+                SELECT message_id, status FROM processed_messages
+                WHERE message_id IN (707, 708) ORDER BY message_id
+                """
+            ).fetchall()
+            audit = connection.execute(
+                """
+                SELECT action, result, error_code
+                FROM conversation_control_events WHERE conversation_id=48
+                """
+            ).fetchone()
+        self.assertEqual(state, ("ai", None, None, None, None, None, None, None, None, 900))
+        self.assertEqual(jobs, [(707, "completed"), (708, "completed")])
+        self.assertEqual(processed, [(707, "completed"), (708, "completed")])
+        self.assertEqual(audit, ("ai_resumed", "succeeded", None))
+        self.assertIsNotNone(waiting_result.job_id)
+        self.assertIsNotNone(queued_result.job_id)
+
+    def test_resume_ai_transaction_rejects_every_blocking_job_stage(self) -> None:
+        blocking_stages = (
+            "generating",
+            "ready_to_deliver",
+            "delivering",
+            "retry_wait",
+            "failed",
+        )
+        for index, stage in enumerate(blocking_stages, start=1):
+            with self.subTest(stage=stage):
+                database_path = Path(self.temp_dir.name) / f"resume-{stage}.db"
+                store = SQLiteJobStore(database_path)
+                with closing(sqlite3.connect(database_path)) as connection:
+                    connection.execute(
+                        """
+                        INSERT INTO conversation_states (
+                            conversation_id, dify_conversation_id, mode
+                        ) VALUES (49, NULL, 'human')
+                        """
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO inbound_jobs (
+                            message_id, account_id, conversation_id, sender_id,
+                            content, labels_json, stage, resume_stage,
+                            outgoing_source_id, message_created_at,
+                            available_at, created_at, updated_at
+                        ) VALUES (?, 1, 49, 9, '问题', '[]', ?, ?, ?, 1000, 1000, 1000, 1000)
+                        """,
+                        (
+                            800 + index,
+                            stage,
+                            "generating" if stage in {"retry_wait", "failed"} else None,
+                            f"ai-cs:{800 + index}:reply",
+                        ),
+                    )
+                    connection.commit()
+
+                self.assertEqual(store.get_resume_precheck(49), "conflict")
+                self.assertEqual(
+                    store.resume_ai_transaction(
+                        49,
+                        cutoff_message_id=900,
+                        now=2_000,
+                    ),
+                    "conflict",
+                )
+                with closing(sqlite3.connect(database_path)) as connection:
+                    mode = connection.execute(
+                        "SELECT mode FROM conversation_states WHERE conversation_id=49"
+                    ).fetchone()
+                    audit_count = connection.execute(
+                        "SELECT COUNT(*) FROM conversation_control_events"
+                    ).fetchone()[0]
+                self.assertEqual(mode, ("human",))
+                self.assertEqual(audit_count, 0)
+
+    def test_resume_ai_transaction_is_idempotent_and_handles_missing_state(self) -> None:
+        self.assertEqual(self.store.get_resume_precheck(999), "not_found")
+        self.assertEqual(
+            self.store.resume_ai_transaction(
+                999,
+                cutoff_message_id=900,
+                now=2_000,
+            ),
+            "not_found",
+        )
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute(
+                """
+                INSERT INTO conversation_states (
+                    conversation_id, dify_conversation_id, mode,
+                    ai_resume_cutoff_message_id
+                ) VALUES (50, NULL, 'ai', 850)
+                """
+            )
+            connection.commit()
+
+        self.assertEqual(self.store.get_resume_precheck(50), "already_ai")
+        self.assertEqual(
+            self.store.resume_ai_transaction(
+                50,
+                cutoff_message_id=900,
+                now=2_000,
+            ),
+            "already_ai",
+        )
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            state = connection.execute(
+                """
+                SELECT mode, ai_resume_cutoff_message_id
+                FROM conversation_states WHERE conversation_id=50
+                """
+            ).fetchone()
+            audit_count = connection.execute(
+                "SELECT COUNT(*) FROM conversation_control_events WHERE conversation_id=50"
+            ).fetchone()[0]
+        self.assertEqual(state, ("ai", 850))
+        self.assertEqual(audit_count, 0)
+
+    def test_record_control_failure_stores_only_stable_error_code(self) -> None:
+        self._seed_human_conversation(51)
+
+        self.store.record_control_failure(
+            51,
+            "ai_resumed",
+            "chatwoot_server_error",
+            now=2_000,
+        )
+
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            audit = connection.execute(
+                """
+                SELECT action, result, error_code
+                FROM conversation_control_events WHERE conversation_id=51
+                """
+            ).fetchone()
+        self.assertEqual(
+            audit,
+            ("ai_resumed", "failed", "chatwoot_server_error"),
+        )
+
     def test_completed_legacy_message_is_duplicate_without_job(self) -> None:
         with closing(sqlite3.connect(self.database_path)) as connection:
             connection.execute(

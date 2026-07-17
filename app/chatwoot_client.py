@@ -185,6 +185,20 @@ class ChatwootClient:
             raise ChatwootAPIError(None, "Chatwoot returned invalid conversation messages.")
         return tuple(message for message in raw_messages if isinstance(message, dict))
 
+    def latest_message_id(self, account_id: int, conversation_id: int) -> int:
+        messages = self.list_conversation_messages(account_id, conversation_id)
+        message_ids = [
+            message["id"]
+            for message in messages
+            if _is_positive_int(message.get("id"))
+        ]
+        if not message_ids:
+            raise ChatwootAPIError(
+                None,
+                "Chatwoot returned no conversation message ID.",
+            )
+        return max(message_ids)
+
     def get_labels(self, account_id: int, conversation_id: int) -> tuple[str, ...]:
         _require_positive_id(account_id, "Account ID")
         _require_positive_id(conversation_id, "Conversation ID")
@@ -218,6 +232,25 @@ class ChatwootClient:
             f"{conversation_id}/labels"
         )
         self._request_json("POST", path, {"labels": list(labels)})
+        return labels
+
+    def remove_label_preserving_existing(
+        self,
+        account_id: int,
+        conversation_id: int,
+        label: str,
+    ) -> tuple[str, ...]:
+        normalized_label = label.strip()
+        if not normalized_label:
+            raise ValueError("Conversation label is required.")
+        current = self.get_labels(account_id, conversation_id)
+        labels = tuple(item for item in current if item != normalized_label)
+        if labels != current:
+            path = (
+                f"/api/v1/accounts/{account_id}/conversations/"
+                f"{conversation_id}/labels"
+            )
+            self._request_json("POST", path, {"labels": list(labels)})
         return labels
 
     def _request_json(

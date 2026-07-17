@@ -209,6 +209,74 @@ class ChatwootClientTests(unittest.TestCase):
         )
         self.assertEqual(labels, ("ai_handoff", "vip", "售后"))
 
+    def test_remove_label_preserves_unrelated_labels(self) -> None:
+        requests: list[object] = []
+
+        def opener(request: object, timeout: float) -> FakeResponse:
+            requests.append(request)
+            if request.get_method() == "GET":
+                return FakeResponse({"payload": ["vip", "ai_handoff", "售后"]})
+            return FakeResponse({"payload": ["vip", "售后"]})
+
+        client = ChatwootClient(
+            base_url="http://127.0.0.1:3000",
+            api_token="chatwoot-secret",
+            opener=opener,
+        )
+
+        labels = client.remove_label_preserving_existing(1, 42, "ai_handoff")
+
+        self.assertEqual(labels, ("vip", "售后"))
+        self.assertEqual([request.get_method() for request in requests], ["GET", "POST"])
+        self.assertEqual(
+            json.loads(requests[1].data.decode("utf-8")),
+            {"labels": ["vip", "售后"]},
+        )
+
+    def test_remove_missing_label_does_not_post_unchanged_labels(self) -> None:
+        requests: list[object] = []
+
+        def opener(request: object, timeout: float) -> FakeResponse:
+            requests.append(request)
+            return FakeResponse({"payload": ["vip", "售后"]})
+
+        client = ChatwootClient(
+            base_url="http://127.0.0.1:3000",
+            api_token="chatwoot-secret",
+            opener=opener,
+        )
+
+        labels = client.remove_label_preserving_existing(1, 42, "ai_handoff")
+
+        self.assertEqual(labels, ("vip", "售后"))
+        self.assertEqual([request.get_method() for request in requests], ["GET"])
+
+    def test_latest_message_id_returns_maximum_valid_id(self) -> None:
+        def opener(request: object, timeout: float) -> FakeResponse:
+            return FakeResponse(
+                {"payload": [{"id": 9}, {"id": 12}, {"id": "bad"}, {"id": True}]}
+            )
+
+        client = ChatwootClient(
+            base_url="http://127.0.0.1:3000",
+            api_token="chatwoot-secret",
+            opener=opener,
+        )
+
+        self.assertEqual(client.latest_message_id(1, 42), 12)
+
+    def test_latest_message_id_rejects_response_without_valid_id(self) -> None:
+        client = ChatwootClient(
+            base_url="http://127.0.0.1:3000",
+            api_token="chatwoot-secret",
+            opener=lambda *args, **kwargs: FakeResponse(
+                {"payload": [{"id": 0}, {"id": "bad"}]}
+            ),
+        )
+
+        with self.assertRaises(ChatwootAPIError):
+            client.latest_message_id(1, 42)
+
     def test_retries_transient_error_once(self) -> None:
         calls = 0
 

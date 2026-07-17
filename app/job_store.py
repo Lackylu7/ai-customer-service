@@ -25,6 +25,8 @@ from app.operations_models import Outcome, Reason
 
 _ERROR_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _RECONCILIATION_CURSOR_NAME = "chatwoot_messages"
+ResumeStoreStatus = Literal["resumed", "already_ai", "not_found", "conflict"]
+ResumePrecheckStatus = ResumeStoreStatus | Literal["ready"]
 
 
 class SQLiteJobStore:
@@ -500,6 +502,128 @@ class SQLiteJobStore:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._complete_row(connection, job_id, now=now)
+
+    def get_resume_precheck(self, conversation_id: int) -> ResumePrecheckStatus:
+        self._validate_positive_id(conversation_id, "Conversation ID")
+        with self._connect() as connection:
+            state = connection.execute(
+                """
+                SELECT mode FROM conversation_states WHERE conversation_id = ?
+                """,
+                (conversation_id,),
+            ).fetchone()
+            if state is None:
+                return "not_found"
+            if state["mode"] == "ai":
+                return "already_ai"
+            blocking = connection.execute(
+                """
+                SELECT 1 FROM inbound_jobs
+                WHERE conversation_id = ?
+                  AND stage IN (
+                      'generating', 'ready_to_deliver', 'delivering',
+                      'retry_wait', 'failed'
+                  )
+                LIMIT 1
+                """,
+                (conversation_id,),
+            ).fetchone()
+            return "conflict" if blocking is not None else "ready"
+
+    def resume_ai_transaction(
+        self,
+        conversation_id: int,
+        *,
+        cutoff_message_id: int,
+        now: int,
+    ) -> ResumeStoreStatus:
+        self._validate_positive_id(conversation_id, "Conversation ID")
+        self._validate_positive_id(cutoff_message_id, "Cutoff message ID")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            state = connection.execute(
+                """
+                SELECT mode FROM conversation_states WHERE conversation_id = ?
+                """,
+                (conversation_id,),
+            ).fetchone()
+            if state is None:
+                return "not_found"
+            if state["mode"] == "ai":
+                return "already_ai"
+            blocking = connection.execute(
+                """
+                SELECT 1 FROM inbound_jobs
+                WHERE conversation_id = ?
+                  AND stage IN (
+                      'generating', 'ready_to_deliver', 'delivering',
+                      'retry_wait', 'failed'
+                  )
+                LIMIT 1
+                """,
+                (conversation_id,),
+            ).fetchone()
+            if blocking is not None:
+                return "conflict"
+
+            self._complete_safe_jobs(
+                connection,
+                conversation_id,
+                cutoff_message_id=cutoff_message_id,
+                now=now,
+            )
+            cursor = connection.execute(
+                """
+                UPDATE conversation_states
+                SET mode = 'ai',
+                    dify_conversation_id = NULL,
+                    handoff_reason = NULL,
+                    human_since = NULL,
+                    last_customer_message_id = NULL,
+                    last_customer_message_at = NULL,
+                    last_human_reply_message_id = NULL,
+                    last_human_reply_at = NULL,
+                    last_fallback_at = NULL,
+                    ai_resume_cutoff_message_id = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE conversation_id = ? AND mode = 'human'
+                """,
+                (cutoff_message_id, conversation_id),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                return "conflict"
+            connection.execute(
+                """
+                INSERT INTO conversation_control_events (
+                    conversation_id, action, result, error_code, created_at
+                ) VALUES (?, 'ai_resumed', 'succeeded', NULL, ?)
+                """,
+                (conversation_id, now),
+            )
+            return "resumed"
+
+    def record_control_failure(
+        self,
+        conversation_id: int,
+        action: Literal["ai_resumed"],
+        error_code: str,
+        *,
+        now: int,
+    ) -> None:
+        self._validate_positive_id(conversation_id, "Conversation ID")
+        if action != "ai_resumed":
+            raise ValueError("Control action is invalid.")
+        self._validate_error_code(error_code)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO conversation_control_events (
+                    conversation_id, action, result, error_code, created_at
+                ) VALUES (?, ?, 'failed', ?, ?)
+                """,
+                (conversation_id, action, error_code, now),
+            )
 
     def save_prepared(
         self,
@@ -1119,6 +1243,31 @@ class SQLiteJobStore:
             """,
             (row["message_id"],),
         )
+
+    def _complete_safe_jobs(
+        self,
+        connection: sqlite3.Connection,
+        conversation_id: int,
+        *,
+        cutoff_message_id: int,
+        now: int,
+    ) -> None:
+        rows = connection.execute(
+            """
+            SELECT id FROM inbound_jobs
+            WHERE conversation_id = ?
+              AND message_id <= ?
+              AND stage IN ('queued', 'human_wait')
+            """,
+            (conversation_id, cutoff_message_id),
+        ).fetchall()
+        for row in rows:
+            self._complete_row(connection, int(row["id"]), now=now)
+
+    @staticmethod
+    def _validate_positive_id(value: int, label: str) -> None:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{label} must be a positive integer.")
 
     @staticmethod
     def _row_to_job(
