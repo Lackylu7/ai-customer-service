@@ -127,6 +127,8 @@ Chatwoot 坐席工作台位于 <http://127.0.0.1:3000>。页面显示“离线�
 
 看板提供近 7 天、近 30 天和全部时间三个范围，展示唯一客户消息、AI 解答率、转人工率、知识缺口率、系统异常和平均处理耗时。顶部受保护的队列面板还显示等待/处理中数量、最老等待、失败任务、Worker 心跳和 Dify/Chatwoot 最近状态。Dify 返回 `[HANDOFF]` 的未知问题会进入知识缺口队列，可标记为“待处理”“已补充”或“已忽略”并填写维护备注；事件和缺口均可导出为适合 Excel 的安全 CSV。
 
+看板的“人工接管会话”区域按 SLA 显示等待中、即将超时和已超时状态。管理员处理完会话后，点击“恢复 AI 接管”并二次确认即可恢复；不需要在服务器运行命令。若接口返回 HTTP 409，表示该会话仍有生成中、投递中、重试中或失败任务，应先处理任务再重试。若 Chatwoot 标签操作失败，本地会话会继续保持人工模式，不会误切回 AI。
+
 `GET /health` 只表示 API 进程存活；`GET /ready` 只有在配置有效、SQLite 可写且 Worker 最近 45 秒内有心跳时才返回 200。反向代理和容器编排应使用 `/ready` 判断整条客服处理链路是否可用。
 
 运营写入采用 best-effort：即使统计数据库暂时不可用，也不会阻止正常 AI 回复或转人工。Chatwoot 后台继续负责坐席绩效、会话和人工接管明细，Dify 后台继续负责模型调用、Token 和检索明细，本看板只聚焦 RAG 业务效果与知识维护闭环。
@@ -140,7 +142,7 @@ docker compose up -d --build docling worker
 docker compose ps
 ```
 
-Compose 会让 API 和 Worker 共享 `.runtime/customer-service` SQLite 状态目录，并让容器通过 `host.docker.internal` 访问本机 Dify 和 Chatwoot。只有 API 端口绑定 `127.0.0.1`，Worker 不发布端口。容器模式下 Chatwoot webhook 仍使用：
+Compose 会让 API 和 Worker 共享 `.runtime/customer-service` SQLite 状态目录，并让容器通过 `host.docker.internal` 访问本机 Dify 和 Chatwoot。只有 API 端口绑定 `127.0.0.1`，Worker 不发布端口。人工 SLA 与托底冷却时间也由项目 `.env` 传给 API 和 Worker。容器模式下 Chatwoot webhook 仍使用：
 
 Dockerfile 会从 PyTorch 官方 CPU 索引安装 Torch，避免在 `DOCLING_DEVICE=cpu` 的环境中下载和打包无用的 CUDA 运行库。
 
@@ -169,6 +171,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\compose-worker-confi
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\rag-evaluation.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\customer-service-e2e.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\chatwoot-real-webhook-e2e.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\human-handoff-e2e.ps1
 python .\tests\operations-dashboard-browser.py
 ```
 
@@ -181,15 +184,38 @@ Docling 冒烟测试：
 .\.venv\Scripts\python.exe .\tests\docling-pdf-smoke.py
 ```
 
-## 从人工模式恢复 AI
+## 人工接管、超时托底与恢复 AI
 
-人工处理完毕后，先在 Chatwoot 中确认可以恢复机器人，再执行：
+默认流程如下：
+
+```text
+客户触发转人工
+  -> AI 添加 ai_handoff 并停止普通回答
+  -> 5 分钟内等待真人客服公开回复
+     -> 真人已公开回复：取消尚未发送的托底，继续由人工接管
+     -> 无真人公开回复：仅发送一次安全托底
+        -> 普通知识问题：发送带“AI 临时协助”标识的 RAG 答案
+        -> 投诉、支付、账户安全、知识不足或 Dify 故障：只提示继续等待人工
+  -> 管理员在 /operations 二次确认“恢复 AI 接管”
+  -> 只有客户下一条新消息进入 RAG，恢复前的旧消息不会补答
+```
+
+“AI 临时协助”只是人工繁忙时的托底，不会改变会话的人工所有权，也不会清除 `ai_handoff` 标签。Chatwoot 坐席的公开回复会取消尚未发送的托底；私密备注不会被当作已回复客户。托底发送后仍保持人工模式，并受同会话冷却时间限制，避免重复刷屏。
+
+相关配置均从项目 `.env` 读取，修改后需重启 API 和 Worker：
+
+| 配置 | 默认值 | 允许范围 | 生产建议 |
+| --- | ---: | ---: | --- |
+| `CUSTOMER_SERVICE_HUMAN_SLA_SECONDS` | 300 秒 | 1..86400 秒 | 按坐席承诺设置为 300..900 秒 |
+| `CUSTOMER_SERVICE_HUMAN_FALLBACK_COOLDOWN_SECONDS` | 300 秒 | 1..86400 秒 | 不小于 SLA，避免连续托底 |
+
+正常恢复应在 <http://127.0.0.1:5001/operations> 操作。`reset-ai-conversation.ps1` 仅保留为看板或控制 API 不可用时的本机应急工具；使用前应先停止 Worker 并确认没有投递中或失败任务：
 
 ```powershell
 .\scripts\reset-ai-conversation.ps1 -ConversationId 42
 ```
 
-脚本只删除 `ai_handoff` 标签，保留其他标签，并清空该会话的 Dify 上下文。重复执行是安全的。
+应急脚本只删除 `ai_handoff` 标签，保留其他标签，并清空该会话的 Dify 上下文。恢复后重新启动 Worker，并只用客户的新消息验证 AI；不要期待系统补答人工期间的旧消息。
 
 ## 失败任务恢复
 

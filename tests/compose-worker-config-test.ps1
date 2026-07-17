@@ -22,7 +22,30 @@ try {
     if (-not (@($workerVolumes | Where-Object { $apiVolumes -contains $_ }).Count)) {
         throw "API and Worker do not share the durable SQLite volume."
     }
-    Write-Output "PASS: Compose runs API and Worker with shared durable storage."
+    foreach ($serviceName in @("docling", "worker")) {
+        $environment = $config.services.$serviceName.environment
+        if ($null -eq $environment.CUSTOMER_SERVICE_HUMAN_SLA_SECONDS) {
+            throw "$serviceName compose config does not expose the human SLA setting."
+        }
+        if ($null -eq $environment.CUSTOMER_SERVICE_HUMAN_FALLBACK_COOLDOWN_SECONDS) {
+            throw "$serviceName compose config does not expose the fallback cooldown setting."
+        }
+    }
+
+    $readme = Get-Content -LiteralPath (Join-Path $projectRoot "README.md") -Raw -Encoding UTF8
+    foreach ($requiredText in @(
+        [Regex]::Unescape('AI\u0020\u4e34\u65f6\u534f\u52a9'),
+        [Regex]::Unescape('\u516c\u5f00\u56de\u590d'),
+        [Regex]::Unescape('\u65e7\u6d88\u606f\u4e0d\u4f1a\u8865\u7b54'),
+        "reset-ai-conversation.ps1",
+        "CUSTOMER_SERVICE_HUMAN_SLA_SECONDS",
+        "CUSTOMER_SERVICE_HUMAN_FALLBACK_COOLDOWN_SECONDS"
+    )) {
+        if ($readme -notmatch [Regex]::Escape($requiredText)) {
+            throw "README is missing the required human-handoff guidance: $requiredText"
+        }
+    }
+    Write-Output "PASS: Compose and README expose durable human-handoff operations."
 }
 finally {
     Pop-Location

@@ -138,7 +138,6 @@ function Wait-ForOperationsDeltas {
         $complete = `
             (($after.replied - $Before.replied) -ge 1) -and `
             (($after.duplicate_webhooks - $Before.duplicate_webhooks) -ge 1) -and `
-            (($after.ignored_human_mode - $Before.ignored_human_mode) -ge 1) -and `
             (($after.handoff_reasons.explicit_human_request - $Before.handoff_reasons.explicit_human_request) -ge 1) -and `
             (($after.handoff_reasons.knowledge_gap - $Before.handoff_reasons.knowledge_gap) -ge 1)
         if ($complete) {
@@ -147,6 +146,29 @@ function Wait-ForOperationsDeltas {
         Start-Sleep -Milliseconds 500
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "Timed out waiting for final customer-service operations events."
+}
+
+function Wait-ForHumanConversation {
+    param(
+        [int]$ConversationId,
+        [int]$TimeoutSeconds = 30
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $result = Invoke-OperationsJson -Method Get -Path "/v1/operations/human-conversations"
+        $matching = @($result.items | Where-Object {
+            [int]$_.conversation_id -eq $ConversationId
+        })
+        if ($matching.Count -eq 1) {
+            return $matching[0]
+        }
+        if ($matching.Count -gt 1) {
+            throw "Human handoff operations contains duplicate conversations."
+        }
+        Start-Sleep -Milliseconds 500
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Timed out waiting for the durable human handoff state."
 }
 
 function Wait-ForKnowledgeGap {
@@ -294,6 +316,13 @@ try {
     $afterHandoff = Send-SignedWebhook -MessageId ($messageBase + 2) -ConversationId $conversationId -SenderId $contactId -Content $afterHandoffQuestion
     Assert-WebhookAccepted -Result $afterHandoff -Scenario "Post-handoff message"
     $null = Wait-ForOutgoingCount -ConversationId $conversationId -ExpectedCount 2
+    $humanConversation = Wait-ForHumanConversation -ConversationId $conversationId
+    if ($humanConversation.handoff_reason -ne "explicit_human_request") {
+        throw "Operations did not expose the durable human handoff reason."
+    }
+    if ($null -eq $humanConversation.last_customer_message_at) {
+        throw "Operations did not expose the latest waiting customer activity."
+    }
 
     $gapConversationOne = Invoke-ChatwootJson -Method Post -Path "/api/v1/accounts/$accountId/conversations" -Body @{
         inbox_id = $inboxId
@@ -312,7 +341,6 @@ try {
     $summaryAfter = Wait-ForOperationsDeltas -Before $summaryBefore
     if (($summaryAfter.replied - $summaryBefore.replied) -lt 1) { throw "Operations summary did not record the AI reply." }
     if (($summaryAfter.duplicate_webhooks - $summaryBefore.duplicate_webhooks) -lt 1) { throw "Operations summary did not record the duplicate webhook." }
-    if (($summaryAfter.ignored_human_mode - $summaryBefore.ignored_human_mode) -lt 1) { throw "Operations summary did not record human-mode silence." }
     if (($summaryAfter.handoff_reasons.explicit_human_request - $summaryBefore.handoff_reasons.explicit_human_request) -lt 1) { throw "Operations summary did not record explicit handoff." }
     if (($summaryAfter.handoff_reasons.knowledge_gap - $summaryBefore.handoff_reasons.knowledge_gap) -lt 1) { throw "Operations summary did not record the knowledge-gap handoff." }
 
@@ -327,7 +355,7 @@ try {
         throw "Knowledge-gap status or note update was not persisted."
     }
 
-    Write-Output "PASS: Customer-service reply, idempotency, handoff, AI silence, metrics, and knowledge-gap operations are verified."
+    Write-Output "PASS: Customer-service reply, idempotency, durable handoff wait, metrics, and knowledge-gap operations are verified."
 }
 finally {
     foreach ($createdConversationId in @($gapConversationIdOne, $conversationId)) {
