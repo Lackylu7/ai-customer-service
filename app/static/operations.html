@@ -189,6 +189,11 @@
       background: #fff5f3;
     }
     .message.visible { display: block; }
+    .message[data-tone="success"] {
+      border-color: #b7d9ca;
+      color: var(--primary-deep);
+      background: #f2faf6;
+    }
 
     .queue-health {
       display: grid;
@@ -232,6 +237,50 @@
     .chart text { fill: var(--muted); font-size: 11px; }
     .chart .grid-line { stroke: #e5ebe7; stroke-width: 1; }
 
+    .human-panel { margin-bottom: 16px; padding: 20px; }
+    .human-list { display: grid; gap: 11px; }
+    .human-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 16px;
+      align-items: center;
+      padding: 17px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fbfdfc;
+    }
+    .human-item[data-sla-status="overdue"] {
+      border-color: #e4aaa3;
+      background: #fff8f7;
+    }
+    .human-main { min-width: 0; }
+    .human-heading { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+    .human-heading h3 { margin: 0; font-size: 15px; }
+    .sla-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      color: var(--primary-deep);
+      background: #e3f1ea;
+      font-size: 12px;
+      font-weight: 750;
+    }
+    .sla-badge[data-status="due_soon"] { color: #8c4c1c; background: #fff0df; }
+    .sla-badge[data-status="overdue"] { color: #922f27; background: #fde4e1; }
+    .human-meta {
+      display: flex;
+      gap: 7px 15px;
+      margin-top: 8px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .blocking-note { color: var(--danger); font-weight: 700; }
+    .human-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .human-actions .link-chip { min-height: 40px; justify-content: center; }
+
     .gap-panel { padding: 20px; }
     .gap-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .field { display: grid; gap: 5px; }
@@ -272,7 +321,7 @@
     .dialog-content h2 { margin: 0; font-size: 21px; }
     .dialog-content p { margin: 8px 0 18px; color: var(--muted); font-size: 13px; }
     .dialog-error { min-height: 20px; margin: 8px 0 0; color: var(--danger); font-size: 12px; }
-    .dialog-actions { display: flex; justify-content: flex-end; margin-top: 17px; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 17px; }
 
     @media (max-width: 1120px) {
       .queue-health { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -294,9 +343,12 @@
       .queue-health { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .kpi { min-height: 118px; padding: 15px; }
-      .panel, .gap-panel { padding: 15px; }
+      .panel, .gap-panel, .human-panel { padding: 15px; }
       .chart { height: 220px; }
       .gap-item { grid-template-columns: 1fr; gap: 13px; }
+      .human-item { grid-template-columns: 1fr; gap: 13px; }
+      .human-actions { align-items: stretch; }
+      .human-actions .button, .human-actions .link-chip { flex: 1 1 130px; }
       .gap-tools, .gap-tools .field { width: 100%; }
       .gap-tools select { width: 100%; }
       .gap-editor-row { align-items: stretch; flex-direction: column; }
@@ -311,6 +363,9 @@
       .status-chip { grid-column: 1 / -1; }
       h1 { font-size: 31px; }
       .chart { height: 200px; }
+      .human-actions { display: grid; grid-template-columns: 1fr; }
+      .dialog-actions { align-items: stretch; flex-direction: column-reverse; }
+      .dialog-actions .button { width: 100%; }
     }
   </style>
 </head>
@@ -383,6 +438,16 @@
       </article>
     </section>
 
+    <section class="card human-panel" aria-labelledby="humanConversationTitle">
+      <div class="panel-header">
+        <div>
+          <h2 id="humanConversationTitle" class="panel-title">人工接管会话</h2>
+          <p id="humanConversationCount" class="panel-subtitle">等待加载</p>
+        </div>
+      </div>
+      <div id="humanConversationList" class="human-list" aria-live="polite"></div>
+    </section>
+
     <section class="card gap-panel">
       <div class="panel-header">
         <div><h2 class="panel-title">知识缺口队列</h2><p id="gapCount" class="panel-subtitle">等待加载</p></div>
@@ -420,10 +485,30 @@
     </form>
   </dialog>
 
+  <dialog id="resumeDialog">
+    <form method="dialog" class="dialog-content">
+      <h2>确认恢复 AI</h2>
+      <p>恢复后，客户下一条新消息将由 AI 回复；人工接管期间的旧消息不会补答。</p>
+      <input id="resumeConversationId" type="hidden">
+      <p id="resumeError" class="dialog-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button id="resumeCancelButton" class="button" value="cancel">取消</button>
+        <button id="resumeConfirmButton" class="button primary" type="button">恢复 AI</button>
+      </div>
+    </form>
+  </dialog>
+
   <script>
     "use strict";
     const KEY_NAME = "operationsKey";
-    const state = { window: "7d", status: "pending", limit: 50, offset: 0, total: 0 };
+    const state = {
+      window: "7d",
+      status: "pending",
+      limit: 50,
+      offset: 0,
+      total: 0,
+      resumeButton: null
+    };
     const reasonLabels = {
       explicit_human_request: "主动要求人工",
       complaint_or_legal: "投诉 / 法律",
@@ -458,9 +543,10 @@
     }
     function apiHeaders() { return { "X-Operations-Key": sessionStorage.getItem(KEY_NAME) || "" }; }
 
-    function showPageMessage(message) {
+    function showPageMessage(message, tone = "error") {
       const node = byId("pageMessage");
       setText(node, message || "");
+      node.dataset.tone = tone;
       node.classList.toggle("visible", Boolean(message));
     }
 
@@ -480,10 +566,22 @@
         sessionStorage.removeItem(KEY_NAME);
         openKeyDialog("密钥不正确，请重新输入。");
       }
-      if (response.status === 503) {
-        openKeyDialog("服务端尚未配置运营管理密钥，请先运行配置脚本。");
+      if (!response.ok) {
+        let detail = "";
+        try {
+          const payload = await response.json();
+          detail = typeof payload.detail === "string" ? payload.detail : "";
+        } catch (parseError) {
+          detail = "";
+        }
+        if (response.status === 503 && detail.includes("Operations API")) {
+          openKeyDialog("服务端尚未配置运营管理密钥，请先运行配置脚本。");
+        }
+        const error = new Error(`HTTP ${response.status}`);
+        error.status = response.status;
+        error.detail = detail;
+        throw error;
       }
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
       return response;
     }
 
@@ -519,6 +617,139 @@
       setText(byId("dependencyHealth"), `Dify ${difyOk ? "正常" : "异常"} · Chatwoot ${chatwootOk ? "正常" : "异常"}`);
       const healthy = failed === 0 && heartbeatAge <= 45 && difyOk && chatwootOk;
       document.querySelector("[data-queue-health]").dataset.status = healthy ? "online" : "error";
+    }
+
+    function createHumanConversationItem(conversation) {
+      const article = document.createElement("article");
+      article.className = "human-item";
+      article.dataset.conversationId = String(conversation.conversation_id);
+      article.dataset.slaStatus = conversation.sla_status;
+
+      const main = document.createElement("div");
+      main.className = "human-main";
+      const heading = document.createElement("div");
+      heading.className = "human-heading";
+      const title = document.createElement("h3");
+      setText(title, `会话 #${conversation.conversation_id}`);
+      const badge = document.createElement("span");
+      badge.className = "sla-badge";
+      badge.dataset.status = conversation.sla_status;
+      const statusLabels = {
+        normal: "等待中",
+        due_soon: "即将超时",
+        overdue: "已超时"
+      };
+      setText(badge, statusLabels[conversation.sla_status] || "等待中");
+      heading.append(title, badge);
+
+      const meta = document.createElement("div");
+      meta.className = "human-meta";
+      const activityAt = conversation.last_customer_message_at ?? conversation.human_since;
+      const values = [
+        `原因：${reasonLabels[conversation.handoff_reason] || "未记录"}`,
+        `等待：${formatDuration(conversation.waiting_seconds)}`,
+        `最近客户活动：${activityAt == null ? "暂无" : formatDate(activityAt)}`,
+        `最近人工回复：${conversation.last_human_reply_at == null ? "暂无" : formatDate(conversation.last_human_reply_at)}`
+      ];
+      values.forEach((value) => {
+        const span = document.createElement("span");
+        setText(span, value);
+        meta.append(span);
+      });
+      if (conversation.has_blocking_job) {
+        const blocking = document.createElement("span");
+        blocking.className = "blocking-note";
+        setText(blocking, "存在投递中或失败任务");
+        meta.append(blocking);
+      }
+      main.append(heading, meta);
+
+      const actions = document.createElement("div");
+      actions.className = "human-actions";
+      const chatwoot = document.createElement("a");
+      chatwoot.className = "link-chip";
+      chatwoot.href = conversation.chatwoot_url;
+      chatwoot.target = "_blank";
+      chatwoot.rel = "noreferrer";
+      setText(chatwoot, "打开 Chatwoot ↗");
+      const resume = document.createElement("button");
+      resume.type = "button";
+      resume.className = "button primary";
+      resume.setAttribute(
+        "data-resume-conversation",
+        String(conversation.conversation_id)
+      );
+      setText(resume, "恢复 AI 接管");
+      resume.addEventListener("click", () => {
+        state.resumeButton = resume;
+        byId("resumeConversationId").value = String(conversation.conversation_id);
+        setText(byId("resumeError"), "");
+        byId("resumeConfirmButton").disabled = false;
+        const dialog = byId("resumeDialog");
+        if (!dialog.open) dialog.showModal();
+      });
+      actions.append(chatwoot, resume);
+      article.append(main, actions);
+      return article;
+    }
+
+    function renderHumanConversations(payload) {
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      const list = byId("humanConversationList");
+      list.replaceChildren();
+      setText(byId("humanConversationCount"), `当前 ${items.length} 个会话由人工接管`);
+      if (!items.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        setText(empty, "当前没有人工接管中的会话。");
+        list.append(empty);
+        return;
+      }
+      items.forEach((conversation) => {
+        list.append(createHumanConversationItem(conversation));
+      });
+    }
+
+    async function loadHumanConversations() {
+      const response = await api("/v1/operations/human-conversations");
+      renderHumanConversations(await response.json());
+    }
+
+    async function resumeConversation() {
+      const conversationId = Number(byId("resumeConversationId").value);
+      const confirm = byId("resumeConfirmButton");
+      const rowButton = state.resumeButton;
+      confirm.disabled = true;
+      if (rowButton) rowButton.disabled = true;
+      setText(byId("resumeError"), "");
+      try {
+        const response = await api(
+          `/v1/operations/conversations/${conversationId}/resume-ai`,
+          { method: "POST" }
+        );
+        const result = await response.json();
+        byId("resumeDialog").close();
+        showPageMessage(
+          result.status === "already_ai"
+            ? "该会话已经由 AI 接管。"
+            : `会话 #${conversationId} 已恢复 AI。`,
+          "success"
+        );
+        try {
+          await loadHumanConversations();
+        } catch (refreshError) {
+          showPageMessage("会话已恢复 AI，但列表刷新失败，请手动刷新。", "success");
+        }
+        state.resumeButton = null;
+      } catch (error) {
+        const message = error.status === 409
+          ? "该会话仍有投递中或失败任务，请先处理任务后重试。"
+          : "恢复失败，AI 仍保持关闭。请检查 Chatwoot 状态后重试。";
+        setText(byId("resumeError"), message);
+      } finally {
+        confirm.disabled = false;
+        if (rowButton && rowButton.isConnected) rowButton.disabled = false;
+      }
     }
 
     function renderTrend(points) {
@@ -684,14 +915,16 @@
       setText(refresh, "加载中…");
       showPageMessage("");
       try {
-        const [summaryResponse, gapsResponse, queueResponse] = await Promise.all([
+        const [summaryResponse, gapsResponse, queueResponse, humanResponse] = await Promise.all([
           api(`/v1/operations/summary?window=${state.window}`),
           api(`/v1/operations/gaps?status=${state.status}&limit=${state.limit}&offset=${state.offset}`),
-          api("/v1/operations/queue")
+          api("/v1/operations/queue"),
+          api("/v1/operations/human-conversations")
         ]);
         renderSummary(await summaryResponse.json());
         renderGaps(await gapsResponse.json());
         renderQueueHealth(await queueResponse.json());
+        renderHumanConversations(await humanResponse.json());
       } catch (error) {
         showPageMessage("数据加载失败。请检查服务状态和运营管理密钥后重试。");
       } finally {
@@ -760,6 +993,7 @@
     byId("refreshButton").addEventListener("click", loadData);
     byId("exportEvents").addEventListener("click", () => downloadCsv("events"));
     byId("exportGaps").addEventListener("click", () => downloadCsv("gaps"));
+    byId("resumeConfirmButton").addEventListener("click", resumeConversation);
     byId("clearKeyButton").addEventListener("click", () => { sessionStorage.removeItem(KEY_NAME); openKeyDialog("当前标签页的密钥已清除。"); });
 
     checkHealth();

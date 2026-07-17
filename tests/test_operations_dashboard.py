@@ -68,6 +68,26 @@ class OperationsDashboardTests(unittest.TestCase):
         self.assertIn("data-worker-heartbeat", source)
         self.assertIn("data-failed-jobs", source)
 
+    def test_dashboard_contains_safe_human_handoff_controls(self) -> None:
+        source = Path("app/static/operations.html").read_text(encoding="utf-8")
+
+        required_ids = (
+            "humanConversationList",
+            "humanConversationCount",
+            "resumeDialog",
+            "resumeConversationId",
+            "resumeCancelButton",
+            "resumeConfirmButton",
+            "resumeError",
+        )
+        for element_id in required_ids:
+            self.assertIn(f'id="{element_id}"', source)
+        self.assertIn("/v1/operations/human-conversations", source)
+        self.assertIn("/resume-ai", source)
+        self.assertIn("data-resume-conversation", source)
+        self.assertNotIn("window.confirm", source)
+        self.assertNotIn(".innerHTML", source)
+
 
 if __name__ == "__main__":
     unittest.main()
