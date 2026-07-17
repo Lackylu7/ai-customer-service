@@ -4,6 +4,7 @@ import sqlite3
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, cast
 
@@ -27,6 +28,19 @@ _ERROR_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _RECONCILIATION_CURSOR_NAME = "chatwoot_messages"
 ResumeStoreStatus = Literal["resumed", "already_ai", "not_found", "conflict"]
 ResumePrecheckStatus = ResumeStoreStatus | Literal["ready"]
+
+
+@dataclass(frozen=True)
+class HumanConversationState:
+    conversation_id: int
+    handoff_reason: str | None
+    human_since: int | None
+    last_customer_message_id: int | None
+    last_customer_message_at: int | None
+    last_human_reply_message_id: int | None
+    last_human_reply_at: int | None
+    last_fallback_at: int | None
+    has_blocking_job: bool
 
 
 class SQLiteJobStore:
@@ -529,6 +543,54 @@ class SQLiteJobStore:
                 (conversation_id,),
             ).fetchone()
             return "conflict" if blocking is not None else "ready"
+
+    def list_human_conversation_states(
+        self,
+    ) -> tuple[HumanConversationState, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT c.conversation_id, c.handoff_reason, c.human_since,
+                       c.last_customer_message_id, c.last_customer_message_at,
+                       c.last_human_reply_message_id, c.last_human_reply_at,
+                       c.last_fallback_at,
+                       EXISTS (
+                           SELECT 1 FROM inbound_jobs AS j
+                           WHERE j.conversation_id = c.conversation_id
+                             AND j.stage IN (
+                                 'generating', 'ready_to_deliver', 'delivering',
+                                 'retry_wait', 'failed'
+                             )
+                       ) AS has_blocking_job
+                FROM conversation_states AS c
+                WHERE c.mode = 'human'
+                ORDER BY COALESCE(
+                             c.last_customer_message_at,
+                             c.human_since
+                         ) ASC,
+                         c.conversation_id ASC
+                """
+            ).fetchall()
+        return tuple(
+            HumanConversationState(
+                conversation_id=int(row["conversation_id"]),
+                handoff_reason=row["handoff_reason"],
+                human_since=_optional_int(row["human_since"]),
+                last_customer_message_id=_optional_int(
+                    row["last_customer_message_id"]
+                ),
+                last_customer_message_at=_optional_int(
+                    row["last_customer_message_at"]
+                ),
+                last_human_reply_message_id=_optional_int(
+                    row["last_human_reply_message_id"]
+                ),
+                last_human_reply_at=_optional_int(row["last_human_reply_at"]),
+                last_fallback_at=_optional_int(row["last_fallback_at"]),
+                has_blocking_job=bool(row["has_blocking_job"]),
+            )
+            for row in rows
+        )
 
     def resume_ai_transaction(
         self,
@@ -1326,3 +1388,7 @@ def _event_not_before(
     if candidate_at is None or candidate_id is None:
         return False
     return (int(candidate_at), int(candidate_id)) >= (target_at, target_id)
+
+
+def _optional_int(value: object) -> int | None:
+    return None if value is None else int(value)

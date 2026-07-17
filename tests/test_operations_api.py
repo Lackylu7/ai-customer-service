@@ -1,8 +1,10 @@
 import codecs
 import os
+import sqlite3
 import tempfile
 import unittest
 import warnings
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -15,6 +17,13 @@ warnings.filterwarnings(
 from fastapi.testclient import TestClient
 
 from app.chatwoot_events import IncomingMessage
+from app.handoff_control import (
+    HandoffConflictError,
+    HandoffNotFoundError,
+    HandoffRemoteError,
+    HandoffStorageError,
+    ResumeResult,
+)
 from app.job_store import SQLiteJobStore
 from app.operations_api import operations_router
 from app.operations_store import OperationsStore
@@ -37,10 +46,20 @@ class OperationsApiTests(unittest.TestCase):
         test_app.include_router(operations_router)
         self.client = TestClient(test_app)
         self.addCleanup(self.client.close)
+        os.environ.pop("CHATWOOT_ACCOUNT_ID", None)
+        os.environ.pop("CHATWOOT_API_TOKEN", None)
 
     def configure_key(self) -> dict[str, str]:
         os.environ["OPERATIONS_API_KEY"] = "correct-secret"
         return {"X-Operations-Key": "correct-secret"}
+
+    def configure_handoff(self) -> dict[str, str]:
+        headers = self.configure_key()
+        os.environ["CHATWOOT_BASE_URL"] = "http://127.0.0.1:3000"
+        os.environ["CHATWOOT_ACCOUNT_ID"] = "1"
+        os.environ["CHATWOOT_API_TOKEN"] = "test-chatwoot-token"
+        os.environ["CUSTOMER_SERVICE_HUMAN_SLA_SECONDS"] = "300"
+        return headers
 
     def test_returns_503_when_operations_key_is_not_configured(self) -> None:
         response = self.client.get("/v1/operations/summary?window=7d")
@@ -223,6 +242,131 @@ class OperationsApiTests(unittest.TestCase):
         self.assertIn("dify", response.json()["dependencies"])
         self.assertIn("chatwoot", response.json()["dependencies"])
         self.assertNotIn("private customer question", response.text)
+
+    def test_human_conversation_list_is_protected_private_and_classified(self) -> None:
+        headers = self.configure_handoff()
+        SQLiteJobStore(self.database_path)
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.executemany(
+                """
+                INSERT INTO conversation_states (
+                    conversation_id, dify_conversation_id, mode,
+                    handoff_reason, human_since,
+                    last_customer_message_id, last_customer_message_at,
+                    last_human_reply_message_id, last_human_reply_at,
+                    last_fallback_at
+                ) VALUES (?, NULL, 'human', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    (41, "explicit_human_request", 1_000, 101, 1_161, None, None, None),
+                    (42, "knowledge_gap", 1_000, 102, 1_160, None, None, None),
+                    (43, "complaint_or_legal", 1_000, 103, 1_100, None, None, 1_399),
+                    (44, "explicit_human_request", 1_000, 104, 1_100, 105, 1_100, None),
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO inbound_jobs (
+                    message_id, account_id, conversation_id, sender_id,
+                    content, labels_json, stage, resume_stage,
+                    outgoing_source_id, message_created_at,
+                    available_at, created_at, updated_at
+                ) VALUES (
+                    900, 1, 43, 9, 'private customer question', '[]',
+                    'failed', 'generating', 'ai-cs:900:reply',
+                    1100, 1100, 1100, 1100
+                )
+                """
+            )
+            connection.commit()
+
+        unauthorized = self.client.get("/v1/operations/human-conversations")
+        with patch("app.operations_api.current_timestamp", return_value=1_400):
+            response = self.client.get(
+                "/v1/operations/human-conversations",
+                headers=headers,
+            )
+
+        self.assertEqual(unauthorized.status_code, 401)
+        self.assertEqual(response.status_code, 200)
+        items = {item["conversation_id"]: item for item in response.json()["items"]}
+        self.assertEqual(
+            (items[41]["waiting_seconds"], items[41]["sla_status"]),
+            (239, "normal"),
+        )
+        self.assertEqual(
+            (items[42]["waiting_seconds"], items[42]["sla_status"]),
+            (240, "due_soon"),
+        )
+        self.assertEqual(
+            (items[43]["waiting_seconds"], items[43]["sla_status"]),
+            (300, "overdue"),
+        )
+        self.assertEqual(
+            (items[44]["waiting_seconds"], items[44]["sla_status"]),
+            (0, "normal"),
+        )
+        self.assertTrue(items[43]["has_blocking_job"])
+        self.assertEqual(items[43]["last_fallback_at"], 1_399)
+        self.assertNotIn("last_customer_message_id", response.text)
+        self.assertNotIn("private customer question", response.text)
+        self.assertNotIn("content", response.text)
+
+    def test_handoff_routes_authenticate_before_loading_control_settings(self) -> None:
+        self.configure_key()
+
+        with patch(
+            "app.operations_api.HandoffOperationsSettings.from_env",
+            side_effect=AssertionError("must authenticate first"),
+        ):
+            response = self.client.get("/v1/operations/human-conversations")
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_handoff_routes_return_503_when_control_is_not_configured(self) -> None:
+        headers = self.configure_key()
+
+        response = self.client.get(
+            "/v1/operations/human-conversations",
+            headers=headers,
+        )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("CHATWOOT_API_TOKEN", response.text)
+
+    def test_resume_ai_api_maps_success_idempotency_and_failures(self) -> None:
+        headers = self.configure_handoff()
+        cases = (
+            (ResumeResult("resumed"), None, 200, "resumed"),
+            (ResumeResult("already_ai"), None, 200, "already_ai"),
+            (None, HandoffNotFoundError(), 404, None),
+            (None, HandoffConflictError(), 409, None),
+            (None, HandoffRemoteError("chatwoot_server_error"), 502, None),
+            (None, HandoffStorageError(), 503, None),
+        )
+
+        for result, error, expected_status, expected_body in cases:
+            with self.subTest(expected_status=expected_status, error=error), patch(
+                "app.operations_api.get_handoff_control_service"
+            ) as factory:
+                if error is None:
+                    factory.return_value.resume_ai.return_value = result
+                else:
+                    factory.return_value.resume_ai.side_effect = error
+                response = self.client.post(
+                    "/v1/operations/conversations/42/resume-ai",
+                    headers=headers,
+                )
+                self.assertEqual(response.status_code, expected_status)
+                if expected_body is not None:
+                    self.assertEqual(response.json()["status"], expected_body)
+                self.assertNotIn("test-chatwoot-token", response.text)
+
+        invalid = self.client.post(
+            "/v1/operations/conversations/0/resume-ai",
+            headers=headers,
+        )
+        self.assertEqual(invalid.status_code, 422)
 
     def test_readiness_requires_writable_database_and_fresh_worker_heartbeat(self) -> None:
         from app.main import app as main_app, get_job_store

@@ -6,11 +6,19 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.chatwoot_client import ChatwootClient
+from app.handoff_control import (
+    HandoffConflictError,
+    HandoffControlService,
+    HandoffNotFoundError,
+    HandoffRemoteError,
+    HandoffStorageError,
+)
 from app.operations_csv import encode_csv
 from app.job_store import SQLiteJobStore
 from app.operations_models import GapStatus
 from app.operations_store import OperationsStore, Window
-from app.settings import OperationsSettings
+from app.settings import HandoffOperationsSettings, OperationsSettings
 
 
 GapFilter = Literal["pending", "resolved", "ignored", "all"]
@@ -79,6 +87,41 @@ OperationsDependency = Annotated[
 ]
 
 
+def require_handoff_operations_settings(
+    operations: OperationsDependency,
+) -> HandoffOperationsSettings:
+    try:
+        return HandoffOperationsSettings.from_env()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Human handoff operations are not configured.",
+        ) from exc
+
+
+HandoffOperationsDependency = Annotated[
+    HandoffOperationsSettings,
+    Depends(require_handoff_operations_settings),
+]
+
+
+def get_handoff_control_service(
+    settings: HandoffOperationsSettings,
+) -> HandoffControlService:
+    return HandoffControlService(
+        store=SQLiteJobStore(settings.database_path),
+        chatwoot=ChatwootClient(
+            base_url=settings.chatwoot_base_url,
+            api_token=settings.chatwoot_api_token,
+            timeout=15,
+        ),
+        account_id=settings.chatwoot_account_id,
+        base_url=settings.chatwoot_base_url,
+        human_sla_seconds=settings.human_sla_seconds,
+        clock=current_timestamp,
+    )
+
+
 @operations_router.get("/summary")
 def operations_summary(
     settings: OperationsDependency,
@@ -101,6 +144,50 @@ def operations_queue(settings: OperationsDependency) -> dict[str, object]:
         "queue": asdict(metrics),
         "dependencies": dependencies,
     }
+
+
+@operations_router.get("/human-conversations")
+def list_human_conversations(
+    settings: HandoffOperationsDependency,
+) -> dict[str, object]:
+    try:
+        items = get_handoff_control_service(settings).list_human_conversations()
+    except HandoffStorageError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Human handoff state is temporarily unavailable.",
+        ) from exc
+    return {"items": [asdict(item) for item in items]}
+
+
+@operations_router.post("/conversations/{conversation_id}/resume-ai")
+def resume_ai_conversation(
+    settings: HandoffOperationsDependency,
+    conversation_id: Annotated[int, Path(gt=0)],
+) -> dict[str, str]:
+    try:
+        result = get_handoff_control_service(settings).resume_ai(conversation_id)
+    except HandoffNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail="Human conversation not found.",
+        ) from exc
+    except HandoffConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Conversation has a blocking job.",
+        ) from exc
+    except HandoffRemoteError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Chatwoot control failed: {exc.error_code}.",
+        ) from exc
+    except HandoffStorageError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Human handoff state is temporarily unavailable.",
+        ) from exc
+    return asdict(result)
 
 
 @operations_router.get("/gaps")

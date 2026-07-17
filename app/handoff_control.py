@@ -5,7 +5,11 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from app.chatwoot_client import ChatwootAPIError
-from app.job_store import ResumePrecheckStatus, ResumeStoreStatus
+from app.job_store import (
+    HumanConversationState,
+    ResumePrecheckStatus,
+    ResumeStoreStatus,
+)
 
 
 SlaStatus = Literal["normal", "due_soon", "overdue"]
@@ -52,6 +56,10 @@ class HandoffStorageError(RuntimeError):
 
 
 class HandoffStore(Protocol):
+    def list_human_conversation_states(
+        self,
+    ) -> tuple[HumanConversationState, ...]: ...
+
     def get_resume_precheck(
         self,
         conversation_id: int,
@@ -125,6 +133,50 @@ class HandoffControlService:
         self._human_sla_seconds = human_sla_seconds
         self._clock = clock or (lambda: int(time.time()))
 
+    def list_human_conversations(self) -> tuple[HumanConversation, ...]:
+        try:
+            states = self._store.list_human_conversation_states()
+        except sqlite3.Error as exc:
+            raise HandoffStorageError() from exc
+        now = self._clock()
+        items: list[HumanConversation] = []
+        for state in states:
+            human_replied = _event_not_before_customer(state)
+            waiting_since = (
+                state.last_customer_message_at
+                if state.last_customer_message_at is not None
+                else state.human_since
+            )
+            waiting_seconds = (
+                0
+                if human_replied or waiting_since is None
+                else max(0, now - waiting_since)
+            )
+            if waiting_seconds >= self._human_sla_seconds:
+                sla_status: SlaStatus = "overdue"
+            elif waiting_seconds * 5 >= self._human_sla_seconds * 4:
+                sla_status = "due_soon"
+            else:
+                sla_status = "normal"
+            items.append(
+                HumanConversation(
+                    conversation_id=state.conversation_id,
+                    handoff_reason=state.handoff_reason,
+                    human_since=state.human_since,
+                    last_customer_message_at=state.last_customer_message_at,
+                    last_human_reply_at=state.last_human_reply_at,
+                    last_fallback_at=state.last_fallback_at,
+                    waiting_seconds=waiting_seconds,
+                    sla_status=sla_status,
+                    has_blocking_job=state.has_blocking_job,
+                    chatwoot_url=(
+                        f"{self._base_url}/app/accounts/{self._account_id}/"
+                        f"conversations/{state.conversation_id}"
+                    ),
+                )
+            )
+        return tuple(items)
+
     def resume_ai(self, conversation_id: int) -> ResumeResult:
         if (
             isinstance(conversation_id, bool)
@@ -185,3 +237,20 @@ class HandoffControlService:
         if status in {"resumed", "already_ai"}:
             return ResumeResult(status)
         raise HandoffStorageError()
+
+
+def _event_not_before_customer(state: HumanConversationState) -> bool:
+    if (
+        state.last_customer_message_at is None
+        or state.last_customer_message_id is None
+        or state.last_human_reply_at is None
+        or state.last_human_reply_message_id is None
+    ):
+        return False
+    return (
+        state.last_human_reply_at,
+        state.last_human_reply_message_id,
+    ) >= (
+        state.last_customer_message_at,
+        state.last_customer_message_id,
+    )

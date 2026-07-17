@@ -1,5 +1,6 @@
 import sqlite3
 import unittest
+from dataclasses import dataclass
 
 from app.chatwoot_client import ChatwootAPIError
 from app.handoff_control import (
@@ -13,6 +14,19 @@ from app.handoff_control import (
 )
 
 
+@dataclass(frozen=True)
+class FakeHumanConversationState:
+    conversation_id: int
+    handoff_reason: str | None
+    human_since: int | None
+    last_customer_message_id: int | None
+    last_customer_message_at: int | None
+    last_human_reply_message_id: int | None
+    last_human_reply_at: int | None
+    last_fallback_at: int | None
+    has_blocking_job: bool
+
+
 class FakeResumeStore:
     def __init__(self) -> None:
         self.precheck = "ready"
@@ -23,6 +37,15 @@ class FakeResumeStore:
         self.failure_error: Exception | None = None
         self.resume_calls: list[tuple[int, int, int]] = []
         self.control_failures: list[tuple[int, str, str, int]] = []
+        self.human_conversations: tuple[FakeHumanConversationState, ...] = ()
+        self.list_error: Exception | None = None
+
+    def list_human_conversation_states(
+        self,
+    ) -> tuple[FakeHumanConversationState, ...]:
+        if self.list_error is not None:
+            raise self.list_error
+        return self.human_conversations
 
     def get_resume_precheck(self, conversation_id: int) -> str:
         if self.precheck_error is not None:
@@ -109,6 +132,47 @@ class HandoffControlServiceTests(unittest.TestCase):
         )
         self.assertEqual(self.store.resume_calls, [(42, 900, 2_000)])
         self.assertEqual(self.store.mode, "ai")
+
+    def test_human_conversation_sla_boundaries_and_reply_ordering(self) -> None:
+        self.store.human_conversations = (
+            FakeHumanConversationState(
+                41, "explicit_human_request", 1_000, 101, 1_761,
+                None, None, None, False,
+            ),
+            FakeHumanConversationState(
+                42, "knowledge_gap", 1_000, 102, 1_760,
+                None, None, None, False,
+            ),
+            FakeHumanConversationState(
+                43, "complaint_or_legal", 1_000, 103, 1_700,
+                None, None, 1_999, True,
+            ),
+            FakeHumanConversationState(
+                44, "explicit_human_request", 1_000, 104, 1_700,
+                105, 1_700, None, False,
+            ),
+        )
+
+        items = self.service.list_human_conversations()
+
+        self.assertEqual(
+            [(item.waiting_seconds, item.sla_status) for item in items],
+            [(239, "normal"), (240, "due_soon"), (300, "overdue"), (0, "normal")],
+        )
+        self.assertTrue(items[2].has_blocking_job)
+        self.assertEqual(items[2].last_fallback_at, 1_999)
+        self.assertEqual(
+            items[0].chatwoot_url,
+            "http://127.0.0.1:3000/app/accounts/1/conversations/41",
+        )
+
+    def test_human_conversation_list_storage_error_is_sanitized(self) -> None:
+        self.store.list_error = sqlite3.OperationalError("private database path")
+
+        with self.assertRaises(HandoffStorageError) as raised:
+            self.service.list_human_conversations()
+
+        self.assertNotIn("private database path", str(raised.exception))
 
     def test_already_ai_is_idempotent_without_remote_calls_or_audit(self) -> None:
         self.store.precheck = "already_ai"
