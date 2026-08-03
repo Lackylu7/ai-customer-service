@@ -1,7 +1,11 @@
 import unittest
 
 from app.dify_client import CreatedDocument
-from app.knowledge_ingestion import FileTooLargeError, KnowledgeIngestionService
+from app.knowledge_ingestion import (
+    FileTooLargeError,
+    KnowledgeIngestionService,
+    validate_document_upload,
+)
 
 
 class FakeDifyClient:
@@ -46,9 +50,9 @@ class KnowledgeIngestionServiceTests(unittest.TestCase):
             indexing_technique="economy",
         )
 
-        result = service.ingest(b"%PDF fixture", "售后政策.pdf")
+        result = service.ingest(b"%PDF-1.7 fixture", "售后政策.pdf")
 
-        self.assertEqual(parser_calls, [(b"%PDF fixture", "售后政策.pdf")])
+        self.assertEqual(parser_calls, [(b"%PDF-1.7 fixture", "售后政策.pdf")])
         self.assertEqual(
             client.calls,
             [
@@ -97,6 +101,33 @@ class KnowledgeIngestionServiceTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             service.ingest(b"content", "empty.pdf")
+
+    def test_upload_validation_allows_supported_signatures(self) -> None:
+        cases = (
+            (b"%PDF-1.7\n", "policy.pdf"),
+            (b"PK\x03\x04fixture", "policy.docx"),
+            (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1fixture", "policy.doc"),
+            ("# 售后政策".encode("utf-8"), "policy.md"),
+            (b"<!doctype html><html></html>", "policy.html"),
+        )
+        for content, filename in cases:
+            with self.subTest(filename=filename):
+                self.assertEqual(validate_document_upload(content, filename), filename)
+
+    def test_upload_validation_rejects_unsupported_or_mismatched_content(self) -> None:
+        cases = (
+            (b"MZ executable", "malware.exe"),
+            (b"not a pdf", "fake.pdf"),
+            (b"not a zip", "fake.docx"),
+            (b"\x00\x01binary", "fake.txt"),
+            (b"plain text", "fake.html"),
+            (b"content", "../policy.pdf"),
+        )
+        for content, filename in cases:
+            with self.subTest(filename=filename), self.assertRaisesRegex(
+                ValueError, "document|filename|type|content"
+            ):
+                validate_document_upload(content, filename)
 
 
 if __name__ == "__main__":

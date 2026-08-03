@@ -42,7 +42,11 @@ function Invoke-WidgetChatwootJson {
             -TimeoutSec 30
     }
     catch {
-        throw "Chatwoot Widget API request failed."
+        $statusCode = 0
+        if ($null -ne $_.Exception.Response) {
+            $statusCode = [int]$_.Exception.Response.StatusCode
+        }
+        throw "Chatwoot Widget API request failed ($Path, HTTP $statusCode)."
     }
 }
 

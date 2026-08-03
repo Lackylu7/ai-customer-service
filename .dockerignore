@@ -3,3 +3,7 @@
 !requirements-docling.txt
 !app/
 !app/**
+!config/
+!config/enterprise.example.json
+!scripts/
+!scripts/verify_docling_models.py

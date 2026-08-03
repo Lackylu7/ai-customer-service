@@ -1,0 +1,60 @@
+services:
+  docling:
+    environment:
+      APP_ENV: "production"
+      APP_ALLOWED_HOSTS: "${OPERATIONS_DOMAIN:?OPERATIONS_DOMAIN is required}"
+      CHATWOOT_PUBLIC_BASE_URL: "https://${SUPPORT_DOMAIN:?SUPPORT_DOMAIN is required}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  worker:
+    environment:
+      APP_ENV: "production"
+      APP_ALLOWED_HOSTS: "${OPERATIONS_DOMAIN:?OPERATIONS_DOMAIN is required}"
+      CHATWOOT_PUBLIC_BASE_URL: "https://${SUPPORT_DOMAIN:?SUPPORT_DOMAIN is required}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  caddy:
+    image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    restart: unless-stopped
+    depends_on:
+      docling:
+        condition: service_healthy
+    environment:
+      ACME_EMAIL: "${ACME_EMAIL:?ACME_EMAIL is required}"
+      SUPPORT_DOMAIN: "${SUPPORT_DOMAIN:?SUPPORT_DOMAIN is required}"
+      OPERATIONS_DOMAIN: "${OPERATIONS_DOMAIN:?OPERATIONS_DOMAIN is required}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - "./infra/caddy:/etc/caddy:ro"
+      - "caddy_data:/data"
+      - "caddy_config:/config"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  caddy_data:
+  caddy_config:

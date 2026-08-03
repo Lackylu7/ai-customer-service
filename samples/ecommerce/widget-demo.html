@@ -3,13 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>星河优选｜在线客服演示</title>
+  <meta name="ai-customer-service-demo" content="1">
+  <title>__COMPANY_NAME_HTML__｜在线客服</title>
   <style>
     :root {
       color-scheme: light;
       font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
       color: #172033;
       background: #f4f7fb;
+      --brand-color: __WIDGET_COLOR_CSS__;
     }
     * { box-sizing: border-box; }
     body { margin: 0; min-height: 100vh; }
@@ -39,7 +41,7 @@
       border: 0;
       border-radius: 12px;
       padding: 13px 18px;
-      background: #2563eb;
+      background: var(--brand-color);
       color: #fff;
       font-size: 15px;
       cursor: pointer;
@@ -57,7 +59,7 @@
     ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 14px; }
     li { padding-bottom: 14px; color: #526079; border-bottom: 1px solid #edf0f5; line-height: 1.55; }
     li:last-child { border-bottom: 0; padding-bottom: 0; }
-    .tag { display: inline-block; margin-right: 8px; color: #2563eb; font-weight: 700; }
+    .tag { display: inline-block; margin-right: 8px; color: var(--brand-color); font-weight: 700; }
     @media (max-width: 760px) {
       main { grid-template-columns: 1fr; padding-top: 52px; }
       header { padding: 16px 20px; }
@@ -66,14 +68,14 @@
 </head>
 <body>
   <header>
-    <div class="brand">星河优选</div>
+    <div class="brand">__COMPANY_NAME_HTML__</div>
     <div class="status">● 客服系统在线</div>
   </header>
   <main>
     <section>
-      <h1>有问题，直接问。</h1>
+      <h1>__ASSISTANT_NAME_HTML__</h1>
       <p class="lead">
-        智能客服会依据星河优选的发货、运费、退货和退款政策回答；遇到投诉、支付安全或无法确定的问题，会在同一个聊天窗口转接人工客服。
+        __WELCOME_MESSAGE_HTML__
       </p>
       <div class="actions">
         <button type="button" data-open-chat>打开在线客服</button>
@@ -93,7 +95,7 @@
 
   <script>
     (function (d, t) {
-      const BASE_URL = "http://127.0.0.1:3000";
+      const BASE_URL = __CHATWOOT_BASE_URL_JSON__;
       const script = d.createElement(t);
       const firstScript = d.getElementsByTagName(t)[0];
       script.src = BASE_URL + "/packs/js/sdk.js";
@@ -101,7 +103,7 @@
       firstScript.parentNode.insertBefore(script, firstScript);
       script.onload = function () {
         window.chatwootSDK.run({
-          websiteToken: "__CHATWOOT_WEBSITE_TOKEN__",
+          websiteToken: __CHATWOOT_WEBSITE_TOKEN_JSON__,
           baseUrl: BASE_URL
         });
       };

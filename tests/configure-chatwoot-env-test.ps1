@@ -6,6 +6,7 @@ $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $tempRoot = Join-Path $tempBase ("chatwoot-env-test-" + [Guid]::NewGuid().ToString("N"))
 $envPath = Join-Path $tempRoot ".env"
 $fixturePath = Join-Path $tempRoot "fixture.json"
+$configPath = Join-Path $tempRoot "enterprise.json"
 $fakeApiToken = "fake-chatwoot-token-for-tests"
 $fakeWebhookSecret = "fake-webhook-secret-for-tests"
 
@@ -20,21 +21,26 @@ try {
 
     @{
         account_id = 7
+        inbox_id = 8
         api_token = $fakeApiToken
         webhook_secret = $fakeWebhookSecret
         website_token = "public-website-token"
     } | ConvertTo-Json | Set-Content -LiteralPath $fixturePath -Encoding UTF8
 
-    $output = & $scriptPath -EnvPath $envPath -FixturePath $fixturePath -RotateWebhookSecret 6>&1 | Out-String
+    Copy-Item -LiteralPath (Join-Path $projectRoot "config\enterprise.example.json") -Destination $configPath
+
+    $output = & $scriptPath -ConfigPath $configPath -EnvPath $envPath -FixturePath $fixturePath -RotateWebhookSecret 6>&1 | Out-String
     $lines = [IO.File]::ReadAllLines($envPath, [Text.Encoding]::UTF8)
 
     foreach ($expected in @(
         "UNRELATED_SETTING=keep-me"
         "CHATWOOT_BASE_URL=http://127.0.0.1:3000"
         "CHATWOOT_ACCOUNT_ID=7"
+        "CHATWOOT_INBOX_ID=8"
         "CHATWOOT_API_TOKEN=$fakeApiToken"
         "CHATWOOT_WEBHOOK_SECRET=$fakeWebhookSecret"
         "CHATWOOT_WEBSITE_TOKEN=public-website-token"
+        "ENTERPRISE_CONFIG_PATH=$configPath"
     )) {
         if (-not $lines.Contains($expected)) {
             throw "Expected local Chatwoot configuration was not written."

@@ -2,6 +2,10 @@ require 'json'
 
 webhook_url = ARGV.fetch(0)
 secret_output = ARGV.fetch(1)
+config = JSON.parse(File.read(ARGV.fetch(2), encoding: 'UTF-8'))
+company = config.fetch('company')
+assistant = config.fetch('assistant')
+chatwoot = config.fetch('chatwoot')
 rotate_webhook_secret = ENV.fetch('ROTATE_CHATWOOT_WEBHOOK_SECRET', '0') == '1'
 
 account = Account.order(:created_at).first
@@ -10,29 +14,43 @@ raise 'Chatwoot has no initialized account.' unless account
 administrator = account.users.order(:created_at).first
 raise 'Chatwoot account has no administrator.' unless administrator
 
-account.update!(name: '星河优选') unless account.name == '星河优选'
+account.update!(name: company.fetch('name')) unless account.name == company.fetch('name')
 
 inbox = account.inboxes.find_by(
-  name: '星河优选在线客服',
+  name: chatwoot.fetch('inbox_name'),
   channel_type: 'Channel::WebWidget'
 )
+inbox ||= account.inboxes.where(channel_type: 'Channel::WebWidget').order(:created_at).first
 unless inbox
   ActiveRecord::Base.transaction do
     channel = account.web_widgets.create!(
-      website_url: 'http://127.0.0.1:8000',
-      widget_color: '#2563eb',
-      welcome_title: '星河优选在线客服',
-      welcome_tagline: '商品、配送与售后问题都可以在这里咨询。'
+      website_url: company.fetch('website_url'),
+      widget_color: chatwoot.fetch('widget_color'),
+      welcome_title: assistant.fetch('welcome_title'),
+      welcome_tagline: assistant.fetch('welcome_message')
     )
     inbox = account.inboxes.create!(
-      name: '星河优选在线客服',
+      name: chatwoot.fetch('inbox_name'),
       channel: channel,
       greeting_enabled: true,
-      greeting_message: '您好，我是星河优选智能客服，请问有什么可以帮您？'
+      greeting_message: assistant.fetch('welcome_message')
     )
     InboxMember.find_or_create_by!(inbox: inbox, user: administrator)
   end
 end
+
+inbox.channel.update!(
+  website_url: company.fetch('website_url'),
+  widget_color: chatwoot.fetch('widget_color'),
+  welcome_title: assistant.fetch('welcome_title'),
+  welcome_tagline: assistant.fetch('welcome_message')
+)
+inbox.update!(
+  name: chatwoot.fetch('inbox_name'),
+  greeting_enabled: true,
+  greeting_message: assistant.fetch('welcome_message')
+)
+InboxMember.find_or_create_by!(inbox: inbox, user: administrator)
 
 webhook = account.webhooks.find_by(name: 'AI Customer Service')
 if webhook

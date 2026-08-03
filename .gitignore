@@ -1,5 +1,6 @@
 .env
 !.env.example
+.env.production
 .venv/
 .runtime/
 .playwright-cli/
@@ -7,6 +8,7 @@
 data/
 artifacts/
 config/enterprise.local.json
+config/store-directory.local.json
 __pycache__/
 *.py[cod]
 *.log

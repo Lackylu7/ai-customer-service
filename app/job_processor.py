@@ -123,12 +123,24 @@ class JobProcessor:
         try:
             prepared = self._service.prepare_human_fallback(message)
         except DifyChatAPIError as exc:
+            error_code = _dify_error_code(exc)
             self._store.record_dependency_status(
                 "dify",
                 ok=False,
-                error_code=_dify_error_code(exc),
+                error_code=error_code,
                 checked_at=now,
             )
+            if exc.status_code not in {401, 403} and (
+                job.generation_attempts < self._settings.generation_max_attempts
+            ):
+                self._store.schedule_retry(
+                    job.id,
+                    resume_stage="generating",
+                    error_code=error_code,
+                    available_at=now + retry_delay_seconds(job.generation_attempts),
+                    now=now,
+                )
+                return
             prepared = HumanFallbackPreparation(
                 PreparedAction.customer_message(self._service.human_wait_text()),
                 "human_wait_notice",

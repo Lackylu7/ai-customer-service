@@ -17,6 +17,11 @@ warnings.filterwarnings(
 from fastapi.testclient import TestClient
 
 from app.chatwoot_events import IncomingMessage
+from app.dingtalk_adapter import (
+    DingTalkInboundMessage,
+    SQLiteDingTalkState,
+)
+from app.enterprise_assistant import EnterpriseAnswer
 from app.handoff_control import (
     HandoffConflictError,
     HandoffNotFoundError,
@@ -25,8 +30,9 @@ from app.handoff_control import (
     ResumeResult,
 )
 from app.job_store import SQLiteJobStore
-from app.operations_api import operations_router
+from app.operations_api import get_handoff_control_service, operations_router
 from app.operations_store import OperationsStore
+from app.settings import HandoffOperationsSettings
 
 
 class OperationsApiTests(unittest.TestCase):
@@ -34,9 +40,13 @@ class OperationsApiTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.database_path = Path(self.temp_dir.name) / "state.db"
+        self.dingtalk_database_path = Path(self.temp_dir.name) / "dingtalk.db"
         self.environment = patch.dict(
             os.environ,
-            {"CUSTOMER_SERVICE_DB_PATH": str(self.database_path)},
+            {
+                "CUSTOMER_SERVICE_DB_PATH": str(self.database_path),
+                "DINGTALK_STATE_DB_PATH": str(self.dingtalk_database_path),
+            },
             clear=False,
         )
         self.environment.start()
@@ -60,6 +70,26 @@ class OperationsApiTests(unittest.TestCase):
         os.environ["CHATWOOT_API_TOKEN"] = "test-chatwoot-token"
         os.environ["CUSTOMER_SERVICE_HUMAN_SLA_SECONDS"] = "300"
         return headers
+
+    def create_dingtalk_human_item(self) -> str:
+        interaction = SQLiteDingTalkState(
+            self.dingtalk_database_path
+        ).record_interaction(
+            message=DingTalkInboundMessage(
+                message_id="dingtalk-message-1",
+                sender_id="private-staff-id",
+                conversation_id="private-conversation-id",
+                text="跨城市调店后原门店分红怎么处理？",
+                channel="direct",
+            ),
+            answer=EnterpriseAnswer(
+                domain="shareholder",
+                action="handoff",
+                text="现有知识不足，请人工核实。",
+                reason="knowledge_gap",
+            ),
+        )
+        return interaction.ticket_code
 
     def test_returns_503_when_operations_key_is_not_configured(self) -> None:
         response = self.client.get("/v1/operations/summary?window=7d")
@@ -97,6 +127,28 @@ class OperationsApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["replied"], 1)
         self.assertEqual(response.json()["answer_rate"]["denominator"], 1)
+
+    def test_ui_config_is_protected_brand_aware_and_secret_free(self) -> None:
+        headers = self.configure_handoff()
+        os.environ["ENTERPRISE_CONFIG_PATH"] = "config/enterprise.example.json"
+        os.environ["CHATWOOT_PUBLIC_BASE_URL"] = "https://support.example.com"
+        os.environ["DIFY_CONSOLE_PUBLIC_URL"] = "https://dify-admin.example.com"
+
+        missing = self.client.get("/v1/operations/ui-config")
+        response = self.client.get("/v1/operations/ui-config", headers=headers)
+
+        self.assertEqual(missing.status_code, 401)
+        self.assertEqual(
+            response.json(),
+            {
+                "company_name": "星河优选",
+                "assistant_name": "星河优选 AI 客服",
+                "chatwoot_url": "https://support.example.com",
+                "dify_console_url": "https://dify-admin.example.com",
+            },
+        )
+        self.assertNotIn("correct-secret", response.text)
+        self.assertNotIn("test-chatwoot-token", response.text)
 
     def test_invalid_filters_and_pagination_return_422(self) -> None:
         headers = self.configure_key()
@@ -200,6 +252,93 @@ class OperationsApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
+
+    def test_dingtalk_human_review_is_protected_private_and_owner_safe(self) -> None:
+        ticket_code = self.create_dingtalk_human_item()
+        headers = self.configure_key()
+
+        unauthorized = self.client.get("/v1/operations/dingtalk-interactions")
+        listed = self.client.get(
+            "/v1/operations/dingtalk-interactions",
+            headers=headers,
+        )
+        claimed = self.client.patch(
+            f"/v1/operations/dingtalk-interactions/{ticket_code}/claim",
+            headers=headers,
+            json={"owner": "小草"},
+        )
+        conflicting_claim = self.client.patch(
+            f"/v1/operations/dingtalk-interactions/{ticket_code}/claim",
+            headers=headers,
+            json={"owner": "然哥"},
+        )
+        wrong_owner_resolution = self.client.patch(
+            f"/v1/operations/dingtalk-interactions/{ticket_code}/resolve",
+            headers=headers,
+            json={
+                "owner": "然哥",
+                "final_answer": "错误领取人不能处理。",
+                "reviewed_by": "稳哥",
+                "knowledge_status": "approved",
+            },
+        )
+        resolved = self.client.patch(
+            f"/v1/operations/dingtalk-interactions/{ticket_code}/resolve",
+            headers=headers,
+            json={
+                "owner": "小草",
+                "final_answer": "该问题需按具体门店协议由股东事务负责人核实。",
+                "reviewed_by": "稳哥",
+                "knowledge_status": "not_reusable",
+            },
+        )
+
+        self.assertEqual(unauthorized.status_code, 401)
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.json()["total"], 1)
+        item = listed.json()["items"][0]
+        self.assertEqual(item["ticket_code"], ticket_code)
+        self.assertNotIn("message_id", item)
+        self.assertNotIn("sender_id", item)
+        self.assertNotIn("conversation_id", item)
+        self.assertNotIn("private-staff-id", listed.text)
+        self.assertEqual(claimed.status_code, 200)
+        self.assertEqual(claimed.json()["owner"], "小草")
+        self.assertEqual(conflicting_claim.status_code, 409)
+        self.assertEqual(wrong_owner_resolution.status_code, 409)
+        self.assertEqual(resolved.status_code, 200)
+        self.assertEqual(resolved.json()["status"], "resolved")
+        self.assertEqual(resolved.json()["knowledge_status"], "not_reusable")
+
+    def test_dingtalk_human_review_rejects_invalid_payloads_and_missing_items(
+        self,
+    ) -> None:
+        headers = self.configure_key()
+
+        invalid_claim = self.client.patch(
+            "/v1/operations/dingtalk-interactions/CS-20260727-000001/claim",
+            headers=headers,
+            json={"owner": "", "unexpected": True},
+        )
+        invalid_resolution = self.client.patch(
+            "/v1/operations/dingtalk-interactions/CS-20260727-000001/resolve",
+            headers=headers,
+            json={
+                "owner": "小草",
+                "final_answer": "",
+                "reviewed_by": "",
+                "knowledge_status": "pending",
+            },
+        )
+        missing = self.client.patch(
+            "/v1/operations/dingtalk-interactions/CS-20260727-999999/claim",
+            headers=headers,
+            json={"owner": "小草"},
+        )
+
+        self.assertEqual(invalid_claim.status_code, 422)
+        self.assertEqual(invalid_resolution.status_code, 422)
+        self.assertEqual(missing.status_code, 404)
 
     def test_queue_health_is_protected_and_exposes_no_job_content(self) -> None:
         headers = self.configure_key()
@@ -334,6 +473,32 @@ class OperationsApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertNotIn("CHATWOOT_API_TOKEN", response.text)
 
+    def test_handoff_control_uses_public_chatwoot_url_for_dashboard_links(self) -> None:
+        settings = HandoffOperationsSettings(
+            chatwoot_base_url="http://host.docker.internal:3000",
+            chatwoot_public_base_url="http://127.0.0.1:3000",
+            chatwoot_account_id=1,
+            chatwoot_api_token="test-chatwoot-token",
+            database_path=self.database_path,
+            human_sla_seconds=300,
+        )
+
+        with patch("app.operations_api.ChatwootClient") as chatwoot, patch(
+            "app.operations_api.HandoffControlService"
+        ) as control:
+            result = get_handoff_control_service(settings)
+
+        self.assertIs(result, control.return_value)
+        chatwoot.assert_called_once_with(
+            base_url="http://host.docker.internal:3000",
+            api_token="test-chatwoot-token",
+            timeout=15,
+        )
+        self.assertEqual(
+            control.call_args.kwargs["base_url"],
+            "http://127.0.0.1:3000",
+        )
+
     def test_resume_ai_api_maps_success_idempotency_and_failures(self) -> None:
         headers = self.configure_handoff()
         cases = (
@@ -428,23 +593,18 @@ class OperationsApiTests(unittest.TestCase):
         self.assertEqual(stale.status_code, 503)
         self.assertEqual(stale.json(), {"status": "not_ready"})
 
-    def test_inbound_queue_starts_when_operations_store_initialization_fails(self) -> None:
+    def test_inbound_queue_defers_operations_store_initialization(self) -> None:
         from app.main import get_inbound_queue
-        from app.operations_models import NullOperationsRecorder
+        from app.operations_models import RecoveringOperationsRecorder
 
         get_inbound_queue.cache_clear()
         self.addCleanup(get_inbound_queue.cache_clear)
 
-        with patch(
-            "app.main.OperationsStore",
-            side_effect=RuntimeError("operations schema unavailable"),
-        ), self.assertLogs("app.main", level="WARNING") as logs:
+        with patch("app.main.OperationsStore") as operations_store:
             queue = get_inbound_queue(self.database_path)
 
-        self.assertIsInstance(queue._operations, NullOperationsRecorder)
-        self.assertTrue(
-            any("Operations store initialization failed" in line for line in logs.output)
-        )
+        self.assertIsInstance(queue._operations, RecoveringOperationsRecorder)
+        operations_store.assert_not_called()
 
 
 if __name__ == "__main__":

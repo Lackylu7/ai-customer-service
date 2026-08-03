@@ -1,12 +1,20 @@
 import hmac
+import os
 import time
 from dataclasses import asdict
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.chatwoot_client import ChatwootClient
+from app.dingtalk_adapter import (
+    DingTalkInteraction,
+    KnowledgeReviewStatus,
+    SQLiteDingTalkState,
+)
+from app.enterprise_config import load_enterprise_config
 from app.handoff_control import (
     HandoffConflictError,
     HandoffControlService,
@@ -23,6 +31,7 @@ from app.settings import HandoffOperationsSettings, OperationsSettings
 
 GapFilter = Literal["pending", "resolved", "ignored", "all"]
 ExportKind = Literal["events", "gaps"]
+DingTalkInteractionFilter = Literal["needs_human", "resolved", "all"]
 
 EVENT_HEADERS = (
     "id",
@@ -53,6 +62,21 @@ class GapUpdate(BaseModel):
 
     status: GapStatus
     note: str = Field(max_length=1000)
+
+
+class DingTalkClaimUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    owner: str = Field(min_length=1, max_length=100)
+
+
+class DingTalkResolutionUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    owner: str = Field(min_length=1, max_length=100)
+    final_answer: str = Field(min_length=1, max_length=4000)
+    reviewed_by: str = Field(min_length=1, max_length=100)
+    knowledge_status: Literal["approved", "not_reusable"]
 
 
 def current_timestamp() -> int:
@@ -116,7 +140,7 @@ def get_handoff_control_service(
             timeout=15,
         ),
         account_id=settings.chatwoot_account_id,
-        base_url=settings.chatwoot_base_url,
+        base_url=settings.chatwoot_public_base_url,
         human_sla_seconds=settings.human_sla_seconds,
         clock=current_timestamp,
     )
@@ -144,6 +168,46 @@ def operations_queue(settings: OperationsDependency) -> dict[str, object]:
         "queue": asdict(metrics),
         "dependencies": dependencies,
     }
+
+
+@operations_router.get("/ui-config")
+def operations_ui_config(
+    settings: HandoffOperationsDependency,
+) -> dict[str, str | None]:
+    try:
+        enterprise = load_enterprise_config(
+            os.getenv(
+                "ENTERPRISE_CONFIG_PATH",
+                "config/enterprise.example.json",
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Enterprise operations configuration is unavailable.",
+        ) from exc
+    dify_console_url = _optional_public_url(os.getenv("DIFY_CONSOLE_PUBLIC_URL", ""))
+    return {
+        "company_name": enterprise.company.name,
+        "assistant_name": enterprise.assistant.name,
+        "chatwoot_url": settings.chatwoot_public_base_url,
+        "dify_console_url": dify_console_url,
+    }
+
+
+def _optional_public_url(value: str) -> str | None:
+    normalized = value.strip().rstrip("/")
+    if not normalized:
+        return None
+    parsed = urlsplit(normalized)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+    return normalized
 
 
 @operations_router.get("/human-conversations")
@@ -224,6 +288,99 @@ def update_operations_gap(
     if gap is None:
         raise HTTPException(status_code=404, detail="Knowledge gap not found.")
     return asdict(gap)
+
+
+@operations_router.get("/dingtalk-interactions")
+def list_dingtalk_interactions(
+    settings: OperationsDependency,
+    status: Annotated[DingTalkInteractionFilter, Query()] = "needs_human",
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, object]:
+    state = SQLiteDingTalkState(settings.dingtalk_database_path)
+    interactions = state.list_interactions(
+        status=None if status == "all" else status
+    )
+    newest_first = tuple(reversed(interactions))
+    page = newest_first[offset : offset + limit]
+    return {
+        "items": [_dingtalk_interaction_payload(item) for item in page],
+        "total": len(newest_first),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@operations_router.patch("/dingtalk-interactions/{ticket_code}/claim")
+def claim_dingtalk_interaction(
+    update: DingTalkClaimUpdate,
+    settings: OperationsDependency,
+    ticket_code: Annotated[
+        str,
+        Path(pattern=r"^CS-\d{8}-\d{6}$"),
+    ],
+) -> dict[str, object]:
+    state = SQLiteDingTalkState(settings.dingtalk_database_path)
+    if state.get_interaction(ticket_code) is None:
+        raise HTTPException(status_code=404, detail="DingTalk interaction not found.")
+    interaction = state.claim_interaction(
+        ticket_code=ticket_code,
+        owner=update.owner,
+    )
+    if interaction is None:
+        raise HTTPException(
+            status_code=409,
+            detail="DingTalk interaction cannot be claimed.",
+        )
+    return _dingtalk_interaction_payload(interaction)
+
+
+@operations_router.patch("/dingtalk-interactions/{ticket_code}/resolve")
+def resolve_dingtalk_interaction(
+    update: DingTalkResolutionUpdate,
+    settings: OperationsDependency,
+    ticket_code: Annotated[
+        str,
+        Path(pattern=r"^CS-\d{8}-\d{6}$"),
+    ],
+) -> dict[str, object]:
+    state = SQLiteDingTalkState(settings.dingtalk_database_path)
+    if state.get_interaction(ticket_code) is None:
+        raise HTTPException(status_code=404, detail="DingTalk interaction not found.")
+    interaction = state.resolve_interaction(
+        ticket_code=ticket_code,
+        owner=update.owner,
+        final_answer=update.final_answer,
+        reviewed_by=update.reviewed_by,
+        knowledge_status=update.knowledge_status,
+    )
+    if interaction is None:
+        raise HTTPException(
+            status_code=409,
+            detail="DingTalk interaction cannot be resolved.",
+        )
+    return _dingtalk_interaction_payload(interaction)
+
+
+def _dingtalk_interaction_payload(
+    interaction: DingTalkInteraction,
+) -> dict[str, object]:
+    return {
+        "ticket_code": interaction.ticket_code,
+        "question": interaction.question,
+        "answer": interaction.answer,
+        "domain": interaction.domain,
+        "action": interaction.action,
+        "reason": interaction.reason,
+        "feedback": interaction.feedback,
+        "status": interaction.status,
+        "owner": interaction.owner,
+        "final_answer": interaction.final_answer,
+        "reviewed_by": interaction.reviewed_by,
+        "knowledge_status": interaction.knowledge_status,
+        "created_at": interaction.created_at,
+        "updated_at": interaction.updated_at,
+    }
 
 
 @operations_router.get("/export.csv")

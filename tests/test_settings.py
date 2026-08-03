@@ -1,3 +1,5 @@
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -62,6 +64,24 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn("chatwoot-secret", rendered)
         self.assertNotIn("webhook-secret", rendered)
 
+    def test_loads_enterprise_configuration_from_explicit_path(self) -> None:
+        payload = json.loads(
+            Path("config/enterprise.example.json").read_text(encoding="utf-8")
+        )
+        payload["company"]["name"] = "测试商城"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "enterprise.json"
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            environment = valid_environment()
+            environment["ENTERPRISE_CONFIG_PATH"] = str(path)
+
+            settings = Settings.from_env(environment)
+
+        self.assertEqual(settings.enterprise_config.company.name, "测试商城")
+
 
 class OperationsSettingsTests(unittest.TestCase):
     def test_operations_settings_are_independent_from_customer_service_secrets(self) -> None:
@@ -102,7 +122,7 @@ class WorkerSettingsTests(unittest.TestCase):
         self.assertEqual(settings.concurrency, 2)
         self.assertEqual(settings.lease_seconds, 300)
         self.assertEqual(settings.reconcile_interval_seconds, 60)
-        self.assertEqual(settings.generation_max_attempts, 2)
+        self.assertEqual(settings.generation_max_attempts, 3)
         self.assertEqual(settings.delivery_max_attempts, 5)
         self.assertEqual(settings.human_sla_seconds, 300)
         self.assertEqual(settings.human_fallback_cooldown_seconds, 300)
@@ -132,7 +152,8 @@ class HandoffOperationsSettingsTests(unittest.TestCase):
     def test_loads_only_chatwoot_control_and_sla_values(self) -> None:
         settings = HandoffOperationsSettings.from_env(
             {
-                "CHATWOOT_BASE_URL": " http://127.0.0.1:3000/ ",
+                "CHATWOOT_BASE_URL": " http://host.docker.internal:3000/ ",
+                "CHATWOOT_PUBLIC_BASE_URL": " http://127.0.0.1:3000/ ",
                 "CHATWOOT_ACCOUNT_ID": "1",
                 "CHATWOOT_API_TOKEN": "control-secret",
                 "CUSTOMER_SERVICE_DB_PATH": "data/state.db",
@@ -140,7 +161,14 @@ class HandoffOperationsSettingsTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(settings.chatwoot_base_url, "http://127.0.0.1:3000")
+        self.assertEqual(
+            settings.chatwoot_base_url,
+            "http://host.docker.internal:3000",
+        )
+        self.assertEqual(
+            settings.chatwoot_public_base_url,
+            "http://127.0.0.1:3000",
+        )
         self.assertEqual(settings.chatwoot_account_id, 1)
         self.assertEqual(settings.database_path, Path("data/state.db"))
         self.assertEqual(settings.human_sla_seconds, 300)

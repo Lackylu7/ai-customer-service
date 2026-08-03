@@ -24,6 +24,9 @@ try {
     }
     foreach ($serviceName in @("docling", "worker")) {
         $environment = $config.services.$serviceName.environment
+        if ([string]$environment.CHATWOOT_PUBLIC_BASE_URL -ne "http://127.0.0.1:3000") {
+            throw "$serviceName compose config does not expose a browser-safe Chatwoot URL."
+        }
         if ($null -eq $environment.CUSTOMER_SERVICE_HUMAN_SLA_SECONDS) {
             throw "$serviceName compose config does not expose the human SLA setting."
         }

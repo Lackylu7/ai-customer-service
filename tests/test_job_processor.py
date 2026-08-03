@@ -329,22 +329,45 @@ class JobProcessorTests(unittest.TestCase):
         self.assertEqual(self.service.prepare_calls, [])
         self.assertEqual(len(self.service.fallback_prepare_calls), 1)
 
-    def test_dify_error_during_human_fallback_uses_wait_notice_without_retry(self) -> None:
+    def test_transient_dify_error_during_human_fallback_schedules_retry(self) -> None:
         self.service.fallback_prepare_error = DifyChatAPIError(
             503,
             "sensitive remote body",
         )
 
         self.processor.process(
-            durable_job(stage="generating", job_kind="human_pending")
+            durable_job(
+                stage="generating",
+                job_kind="human_pending",
+                generation_attempts=1,
+            )
+        )
+
+        self.assertEqual(self.store.saved_fallbacks, [])
+        self.assertEqual(self.store.retries[0].resume_stage, "generating")
+        self.assertEqual(self.store.retries[0].error_code, "dify_server_error")
+        self.assertEqual(self.store.retries[0].available_at, 1_005)
+        self.assertEqual(self.store.dependencies[-1]["error_code"], "dify_server_error")
+        self.assertNotIn("sensitive remote body", repr(self.store.dependencies))
+
+    def test_exhausted_dify_error_during_human_fallback_uses_wait_notice(self) -> None:
+        self.service.fallback_prepare_error = DifyChatAPIError(
+            503,
+            "sensitive remote body",
+        )
+
+        self.processor.process(
+            durable_job(
+                stage="generating",
+                job_kind="human_pending",
+                generation_attempts=3,
+            )
         )
 
         saved = self.store.saved_fallbacks[0]
         self.assertEqual(saved.job_kind, "human_wait_notice")
         self.assertEqual(saved.action.customer_text, self.service.human_wait_text())
         self.assertEqual(self.store.retries, [])
-        self.assertEqual(self.store.dependencies[-1]["error_code"], "dify_server_error")
-        self.assertNotIn("sensitive remote body", repr(self.store.dependencies))
 
     def test_transient_dify_error_schedules_generation_retry(self) -> None:
         self.service.prepare_error = DifyChatAPIError(None, "timeout detail")
@@ -362,7 +385,7 @@ class JobProcessorTests(unittest.TestCase):
         self.service.prepare_error = DifyChatAPIError(503, "remote body")
 
         self.processor.process(
-            durable_job(stage="generating", generation_attempts=2)
+            durable_job(stage="generating", generation_attempts=3)
         )
 
         self.assertEqual(self.store.saved_actions[-1].reason, "dify_error")

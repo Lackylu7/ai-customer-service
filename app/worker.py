@@ -16,7 +16,7 @@ from app.dify_chat_client import DifyChatClient
 from app.inbound_queue import InboundQueue
 from app.job_processor import JobProcessor
 from app.job_store import SQLiteJobStore
-from app.operations_models import NullOperationsRecorder
+from app.operations_models import RecoveringOperationsRecorder
 from app.operations_store import OperationsStore
 from app.settings import Settings, WorkerSettings
 
@@ -154,14 +154,9 @@ def build_supervisor() -> WorkerSupervisor:
     settings = Settings.from_env()
     worker_settings = WorkerSettings.from_env()
     job_store = SQLiteJobStore(settings.customer_service_db_path)
-    try:
-        operations = OperationsStore(settings.customer_service_db_path)
-    except Exception:
-        logger.warning(
-            "Operations store initialization failed; metrics are disabled.",
-            exc_info=True,
-        )
-        operations = NullOperationsRecorder()
+    operations = RecoveringOperationsRecorder(
+        lambda: OperationsStore(settings.customer_service_db_path)
+    )
     chatwoot_client = ChatwootClient(
         base_url=settings.chatwoot_base_url,
         api_token=settings.chatwoot_api_token,
@@ -176,6 +171,7 @@ def build_supervisor() -> WorkerSupervisor:
         ),
         chatwoot_client=chatwoot_client,
         operations_recorder=operations,
+        handoff_message=settings.enterprise_config.assistant.handoff_message,
     )
     processor = JobProcessor(
         service=service,

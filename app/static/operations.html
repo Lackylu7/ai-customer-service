@@ -281,6 +281,62 @@
     .human-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .human-actions .link-chip { min-height: 40px; justify-content: center; }
 
+    .interaction-panel { margin-bottom: 16px; padding: 20px; }
+    .interaction-list { display: grid; gap: 12px; }
+    .interaction-item {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(330px, 0.85fr);
+      gap: 18px;
+      padding: 17px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fbfdfc;
+    }
+    .interaction-main, .interaction-editor { min-width: 0; }
+    .interaction-heading { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+    .interaction-heading h3 { margin: 0; font-size: 15px; }
+    .interaction-badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      padding: 3px 9px;
+      border-radius: 999px;
+      color: #8c4c1c;
+      background: #fff0df;
+      font-size: 12px;
+      font-weight: 750;
+    }
+    .interaction-badge[data-status="resolved"] { color: var(--primary-deep); background: #e3f1ea; }
+    .interaction-meta { display: flex; gap: 7px 15px; margin: 8px 0 13px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
+    .interaction-copy { display: grid; gap: 5px; margin-top: 11px; }
+    .interaction-copy strong { color: var(--muted); font-size: 12px; }
+    .interaction-copy p { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+    .interaction-editor { display: grid; align-content: start; gap: 10px; }
+    .interaction-editor-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 9px; }
+    .interaction-editor textarea { min-height: 100px; }
+    .interaction-action-row { display: flex; align-items: center; justify-content: space-between; gap: 9px; flex-wrap: wrap; }
+    .interaction-feedback { min-height: 18px; color: var(--primary); font-size: 12px; }
+
+    .knowledge-panel { margin-bottom: 16px; padding: 20px; }
+    .knowledge-controls { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; }
+    .knowledge-controls .field { flex: 1 1 360px; }
+    .knowledge-hint { margin: 7px 0 0; color: var(--muted); font-size: 12px; }
+    .upload-results { display: grid; gap: 8px; margin-top: 14px; }
+    .upload-result {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fbfdfc;
+      font-size: 13px;
+    }
+    .upload-result span:first-child { min-width: 0; overflow-wrap: anywhere; font-weight: 700; }
+    .upload-result[data-tone="success"] span:last-child { color: var(--primary); }
+    .upload-result[data-tone="error"] { border-color: #efc5bf; background: #fff8f7; }
+    .upload-result[data-tone="error"] span:last-child { color: var(--danger); }
+
     .gap-panel { padding: 20px; }
     .gap-tools { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .field { display: grid; gap: 5px; }
@@ -343,12 +399,16 @@
       .queue-health { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .kpi { min-height: 118px; padding: 15px; }
-      .panel, .gap-panel, .human-panel { padding: 15px; }
+      .panel, .gap-panel, .human-panel, .knowledge-panel, .interaction-panel { padding: 15px; }
       .chart { height: 220px; }
       .gap-item { grid-template-columns: 1fr; gap: 13px; }
       .human-item { grid-template-columns: 1fr; gap: 13px; }
+      .interaction-item { grid-template-columns: 1fr; gap: 15px; }
+      .interaction-editor-grid { grid-template-columns: 1fr; }
       .human-actions { align-items: stretch; }
       .human-actions .button, .human-actions .link-chip { flex: 1 1 130px; }
+      .knowledge-controls { align-items: stretch; flex-direction: column; }
+      .knowledge-controls .field, .knowledge-controls .button { width: 100%; }
       .gap-tools, .gap-tools .field { width: 100%; }
       .gap-tools select { width: 100%; }
       .gap-editor-row { align-items: stretch; flex-direction: column; }
@@ -375,14 +435,14 @@
       <div class="brand">
         <div class="brand-mark" aria-hidden="true">AI</div>
         <div class="brand-copy">
-          <strong>星河优选 · 客服运营</strong>
+          <strong id="operationsBrandName">企业 AI 客服 · 客服运营</strong>
           <span>RAG 知识闭环工作台</span>
         </div>
       </div>
       <nav class="top-actions" aria-label="服务入口">
         <span id="serviceStatus" class="status-chip" data-status="checking">服务检查中</span>
-        <a class="link-chip" href="http://127.0.0.1:3000" target="_blank" rel="noreferrer">Chatwoot ↗</a>
-        <a class="link-chip" href="http://127.0.0.1:8081" target="_blank" rel="noreferrer">Dify ↗</a>
+        <a id="chatwootLink" class="link-chip" href="#" target="_blank" rel="noreferrer" hidden>Chatwoot ↗</a>
+        <a id="difyLink" class="link-chip" href="#" target="_blank" rel="noreferrer" hidden>Dify ↗</a>
       </nav>
     </header>
 
@@ -438,6 +498,24 @@
       </article>
     </section>
 
+    <section class="card knowledge-panel" aria-labelledby="knowledgeUploadTitle">
+      <div class="panel-header">
+        <div>
+          <h2 id="knowledgeUploadTitle" class="panel-title">导入企业知识资料</h2>
+          <p id="knowledgeUploadStatus" class="panel-subtitle">Docling 整理后提交到当前企业的 Dify 知识库</p>
+        </div>
+      </div>
+      <div class="knowledge-controls">
+        <div class="field">
+          <label for="knowledgeFiles">选择资料（单个文件不超过 20 MB）</label>
+          <input id="knowledgeFiles" type="file" multiple accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md,.csv,.html,.htm">
+        </div>
+        <button id="uploadKnowledgeButton" class="button primary" type="button">开始整理并导入</button>
+      </div>
+      <p class="knowledge-hint">支持 PDF、Office、Markdown、TXT、CSV 和 HTML。请先删除过期内容、隐私数据和重复版本；索引完成后再做问答验收。</p>
+      <div id="knowledgeUploadResults" class="upload-results" aria-live="polite"></div>
+    </section>
+
     <section class="card human-panel" aria-labelledby="humanConversationTitle">
       <div class="panel-header">
         <div>
@@ -446,6 +524,26 @@
         </div>
       </div>
       <div id="humanConversationList" class="human-list" aria-live="polite"></div>
+    </section>
+
+    <section class="card interaction-panel" aria-labelledby="dingtalkInteractionTitle">
+      <div class="panel-header">
+        <div>
+          <h2 id="dingtalkInteractionTitle" class="panel-title">钉钉待人工问题</h2>
+          <p id="dingtalkInteractionCount" class="panel-subtitle">等待加载</p>
+        </div>
+        <div class="gap-tools">
+          <div class="field">
+            <label for="dingtalkInteractionStatus">处理状态</label>
+            <select id="dingtalkInteractionStatus">
+              <option value="needs_human">待人工</option>
+              <option value="resolved">已处理</option>
+              <option value="all">全部状态</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div id="dingtalkInteractionList" class="interaction-list" aria-live="polite"></div>
     </section>
 
     <section class="card gap-panel">
@@ -501,12 +599,18 @@
   <script>
     "use strict";
     const KEY_NAME = "operationsKey";
+    const MAX_KNOWLEDGE_FILE_SIZE = 20 * 1024 * 1024;
+    const SUPPORTED_KNOWLEDGE_EXTENSIONS = new Set([
+      ".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx",
+      ".txt", ".md", ".csv", ".html", ".htm"
+    ]);
     const state = {
       window: "7d",
       status: "pending",
       limit: 50,
       offset: 0,
       total: 0,
+      dingtalkStatus: "needs_human",
       resumeButton: null
     };
     const reasonLabels = {
@@ -515,6 +619,19 @@
       payment_or_account_security: "支付 / 账户安全",
       knowledge_gap: "知识不足",
       dify_error: "Dify 故障"
+    };
+    const domainLabels = {
+      shareholder: "股东制度",
+      finance: "财务",
+      hr: "人事",
+      activity: "活动",
+      operations: "门店运营",
+      unknown: "未分类"
+    };
+    const feedbackLabels = {
+      resolved: "用户已解决",
+      unresolved: "用户未解决",
+      human_requested: "用户主动转人工"
     };
     const svgNamespace = "http://www.w3.org/2000/svg";
 
@@ -558,11 +675,16 @@
     }
 
     async function api(path, options = {}) {
+      const requestHeaders = { ...apiHeaders(), ...(options.headers || {}) };
+      const requestKey = requestHeaders["X-Operations-Key"] || "";
       const response = await fetch(path, {
         ...options,
-        headers: { ...apiHeaders(), ...(options.headers || {}) }
+        headers: requestHeaders
       });
-      if (response.status === 401) {
+      if (
+        response.status === 401 &&
+        sessionStorage.getItem(KEY_NAME) === requestKey
+      ) {
         sessionStorage.removeItem(KEY_NAME);
         openKeyDialog("密钥不正确，请重新输入。");
       }
@@ -617,6 +739,20 @@
       setText(byId("dependencyHealth"), `Dify ${difyOk ? "正常" : "异常"} · Chatwoot ${chatwootOk ? "正常" : "异常"}`);
       const healthy = failed === 0 && heartbeatAge <= 45 && difyOk && chatwootOk;
       document.querySelector("[data-queue-health]").dataset.status = healthy ? "online" : "error";
+    }
+
+    function renderUiConfig(config) {
+      setText(byId("operationsBrandName"), `${config.company_name} · 客服运营`);
+      const chatwootLink = byId("chatwootLink");
+      chatwootLink.href = config.chatwoot_url;
+      chatwootLink.hidden = false;
+      const difyLink = byId("difyLink");
+      if (config.dify_console_url) {
+        difyLink.href = config.dify_console_url;
+        difyLink.hidden = false;
+      } else {
+        difyLink.hidden = true;
+      }
     }
 
     function createHumanConversationItem(conversation) {
@@ -750,6 +886,216 @@
         confirm.disabled = false;
         if (rowButton && rowButton.isConnected) rowButton.disabled = false;
       }
+    }
+
+    function createDingTalkInteractionItem(interaction) {
+      const article = document.createElement("article");
+      article.className = "interaction-item";
+      article.dataset.ticketCode = interaction.ticket_code;
+
+      const main = document.createElement("div");
+      main.className = "interaction-main";
+      const heading = document.createElement("div");
+      heading.className = "interaction-heading";
+      const title = document.createElement("h3");
+      setText(title, interaction.ticket_code);
+      const badge = document.createElement("span");
+      badge.className = "interaction-badge";
+      badge.dataset.status = interaction.status;
+      setText(badge, interaction.status === "resolved" ? "已处理" : "待人工");
+      heading.append(title, badge);
+
+      const meta = document.createElement("div");
+      meta.className = "interaction-meta";
+      [
+        domainLabels[interaction.domain] || "未分类",
+        formatDate(interaction.created_at),
+        feedbackLabels[interaction.feedback] || (interaction.reason === "knowledge_gap" ? "知识不足" : "待核实"),
+        interaction.owner ? `负责人：${interaction.owner}` : "尚未领取"
+      ].forEach((value) => {
+        const span = document.createElement("span");
+        setText(span, value);
+        meta.append(span);
+      });
+      main.append(heading, meta);
+
+      [
+        ["员工问题", interaction.question],
+        ["机器人原答", interaction.answer]
+      ].forEach(([label, value]) => {
+        const block = document.createElement("div");
+        block.className = "interaction-copy";
+        const strong = document.createElement("strong");
+        const paragraph = document.createElement("p");
+        setText(strong, label);
+        setText(paragraph, value);
+        block.append(strong, paragraph);
+        main.append(block);
+      });
+      if (interaction.final_answer) {
+        const block = document.createElement("div");
+        block.className = "interaction-copy";
+        const strong = document.createElement("strong");
+        const paragraph = document.createElement("p");
+        setText(strong, "最终权威答案");
+        setText(paragraph, interaction.final_answer);
+        block.append(strong, paragraph);
+        main.append(block);
+      }
+
+      const editor = document.createElement("div");
+      editor.className = "interaction-editor";
+      if (interaction.status === "needs_human") {
+        const ownerField = document.createElement("div");
+        ownerField.className = "field";
+        const ownerLabel = document.createElement("label");
+        const owner = document.createElement("input");
+        owner.id = `owner-${interaction.ticket_code}`;
+        owner.maxLength = 100;
+        owner.value = interaction.owner || "";
+        owner.placeholder = "填写负责人姓名";
+        ownerLabel.htmlFor = owner.id;
+        setText(ownerLabel, "负责人");
+        ownerField.append(ownerLabel, owner);
+
+        const claimFeedback = document.createElement("span");
+        claimFeedback.className = "interaction-feedback";
+        const claim = document.createElement("button");
+        claim.type = "button";
+        claim.className = "button";
+        setText(claim, interaction.owner ? "确认领取人" : "领取问题");
+        claim.addEventListener("click", async () => {
+          const ownerValue = owner.value.trim();
+          if (!ownerValue) {
+            setText(claimFeedback, "请先填写负责人");
+            return;
+          }
+          claim.disabled = true;
+          setText(claimFeedback, "领取中…");
+          try {
+            await api(`/v1/operations/dingtalk-interactions/${encodeURIComponent(interaction.ticket_code)}/claim`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ owner: ownerValue })
+            });
+            setText(claimFeedback, "已领取");
+          } catch (error) {
+            setText(claimFeedback, error.status === 409 ? "已由其他负责人领取" : "领取失败，请重试");
+          } finally {
+            claim.disabled = false;
+          }
+        });
+        const claimRow = document.createElement("div");
+        claimRow.className = "interaction-action-row";
+        claimRow.append(claimFeedback, claim);
+
+        const answerField = document.createElement("div");
+        answerField.className = "field";
+        const answerLabel = document.createElement("label");
+        const finalAnswer = document.createElement("textarea");
+        finalAnswer.id = `answer-${interaction.ticket_code}`;
+        finalAnswer.maxLength = 4000;
+        finalAnswer.placeholder = "填写已回复给员工的最终权威答案";
+        answerLabel.htmlFor = finalAnswer.id;
+        setText(answerLabel, "最终权威答案");
+        answerField.append(answerLabel, finalAnswer);
+
+        const reviewGrid = document.createElement("div");
+        reviewGrid.className = "interaction-editor-grid";
+        const reviewerField = document.createElement("div");
+        reviewerField.className = "field";
+        const reviewerLabel = document.createElement("label");
+        const reviewer = document.createElement("input");
+        reviewer.id = `reviewer-${interaction.ticket_code}`;
+        reviewer.maxLength = 100;
+        reviewer.placeholder = "填写审核人姓名";
+        reviewerLabel.htmlFor = reviewer.id;
+        setText(reviewerLabel, "审核人");
+        reviewerField.append(reviewerLabel, reviewer);
+        const knowledgeField = document.createElement("div");
+        knowledgeField.className = "field";
+        const knowledgeLabel = document.createElement("label");
+        const knowledgeStatus = document.createElement("select");
+        knowledgeStatus.id = `knowledge-${interaction.ticket_code}`;
+        [["approved", "可沉淀知识"], ["not_reusable", "仅个案处理"]].forEach(([value, label]) => {
+          const option = document.createElement("option");
+          option.value = value;
+          setText(option, label);
+          knowledgeStatus.append(option);
+        });
+        knowledgeLabel.htmlFor = knowledgeStatus.id;
+        setText(knowledgeLabel, "知识处理");
+        knowledgeField.append(knowledgeLabel, knowledgeStatus);
+        reviewGrid.append(reviewerField, knowledgeField);
+
+        const resolveFeedback = document.createElement("span");
+        resolveFeedback.className = "interaction-feedback";
+        const resolve = document.createElement("button");
+        resolve.type = "button";
+        resolve.className = "button primary";
+        setText(resolve, "确认已回复并完成");
+        resolve.addEventListener("click", async () => {
+          const payload = {
+            owner: owner.value.trim(),
+            final_answer: finalAnswer.value.trim(),
+            reviewed_by: reviewer.value.trim(),
+            knowledge_status: knowledgeStatus.value
+          };
+          if (!payload.owner || !payload.final_answer || !payload.reviewed_by) {
+            setText(resolveFeedback, "请填写负责人、最终答案和审核人");
+            return;
+          }
+          resolve.disabled = true;
+          setText(resolveFeedback, "提交中…");
+          try {
+            await api(`/v1/operations/dingtalk-interactions/${encodeURIComponent(interaction.ticket_code)}/resolve`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
+            setText(resolveFeedback, "已完成");
+            await loadDingTalkInteractions();
+          } catch (error) {
+            setText(resolveFeedback, error.status === 409 ? "请先用同一负责人领取问题" : "提交失败，请重试");
+          } finally {
+            resolve.disabled = false;
+          }
+        });
+        const resolveRow = document.createElement("div");
+        resolveRow.className = "interaction-action-row";
+        resolveRow.append(resolveFeedback, resolve);
+        editor.append(ownerField, claimRow, answerField, reviewGrid, resolveRow);
+      } else {
+        const completed = document.createElement("div");
+        completed.className = "empty-state";
+        const knowledgeLabel = interaction.knowledge_status === "approved" ? "可沉淀知识" : "仅个案处理";
+        setText(completed, `${interaction.owner || "负责人未记录"}处理 · ${interaction.reviewed_by || "审核人未记录"}审核 · ${knowledgeLabel}`);
+        editor.append(completed);
+      }
+
+      article.append(main, editor);
+      return article;
+    }
+
+    function renderDingTalkInteractions(payload) {
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      const total = Number(payload.total || 0);
+      const list = byId("dingtalkInteractionList");
+      list.replaceChildren();
+      setText(byId("dingtalkInteractionCount"), `当前筛选共 ${total} 条`);
+      if (!items.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty-state";
+        setText(empty, "当前筛选下没有钉钉问题。");
+        list.append(empty);
+        return;
+      }
+      items.forEach((interaction) => list.append(createDingTalkInteractionItem(interaction)));
+    }
+
+    async function loadDingTalkInteractions() {
+      const response = await api(`/v1/operations/dingtalk-interactions?status=${state.dingtalkStatus}&limit=50&offset=0`);
+      renderDingTalkInteractions(await response.json());
     }
 
     function renderTrend(points) {
@@ -915,16 +1261,20 @@
       setText(refresh, "加载中…");
       showPageMessage("");
       try {
-        const [summaryResponse, gapsResponse, queueResponse, humanResponse] = await Promise.all([
+        const [uiResponse, summaryResponse, gapsResponse, queueResponse, humanResponse, dingtalkResponse] = await Promise.all([
+          api("/v1/operations/ui-config"),
           api(`/v1/operations/summary?window=${state.window}`),
           api(`/v1/operations/gaps?status=${state.status}&limit=${state.limit}&offset=${state.offset}`),
           api("/v1/operations/queue"),
-          api("/v1/operations/human-conversations")
+          api("/v1/operations/human-conversations"),
+          api(`/v1/operations/dingtalk-interactions?status=${state.dingtalkStatus}&limit=50&offset=0`)
         ]);
+        renderUiConfig(await uiResponse.json());
         renderSummary(await summaryResponse.json());
         renderGaps(await gapsResponse.json());
         renderQueueHealth(await queueResponse.json());
         renderHumanConversations(await humanResponse.json());
+        renderDingTalkInteractions(await dingtalkResponse.json());
       } catch (error) {
         showPageMessage("数据加载失败。请检查服务状态和运营管理密钥后重试。");
       } finally {
@@ -948,6 +1298,79 @@
       } catch (error) {
         showPageMessage("CSV 导出失败，请稍后重试。");
       }
+    }
+
+    function addKnowledgeUploadResult(filename, message, tone = "pending") {
+      const row = document.createElement("div");
+      row.className = "upload-result";
+      row.dataset.tone = tone;
+      const name = document.createElement("span");
+      const status = document.createElement("span");
+      setText(name, filename);
+      setText(status, message);
+      row.append(name, status);
+      byId("knowledgeUploadResults").append(row);
+      return row;
+    }
+
+    async function uploadKnowledgeFiles() {
+      const operationsKey = sessionStorage.getItem(KEY_NAME) || "";
+      if (!operationsKey) {
+        openKeyDialog("请先输入运营管理密钥，再导入知识资料。");
+        return;
+      }
+      const files = Array.from(byId("knowledgeFiles").files || []);
+      if (!files.length) {
+        setText(byId("knowledgeUploadStatus"), "请先选择至少一个资料文件。");
+        return;
+      }
+
+      const button = byId("uploadKnowledgeButton");
+      const input = byId("knowledgeFiles");
+      button.disabled = true;
+      input.disabled = true;
+      byId("knowledgeUploadResults").replaceChildren();
+      let succeeded = 0;
+      let failed = 0;
+
+      for (const file of files) {
+        const dot = file.name.lastIndexOf(".");
+        const extension = dot >= 0 ? file.name.slice(dot).toLowerCase() : "";
+        if (!SUPPORTED_KNOWLEDGE_EXTENSIONS.has(extension) || file.size <= 0 || file.size > MAX_KNOWLEDGE_FILE_SIZE) {
+          addKnowledgeUploadResult(file.name, "文件类型、大小或内容不符合要求", "error");
+          failed += 1;
+          continue;
+        }
+
+        const row = addKnowledgeUploadResult(file.name, "Docling 整理中…");
+        const formData = new FormData();
+        formData.append("file", file, file.name);
+        try {
+          const response = await api("/v1/knowledge/documents", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${operationsKey}` },
+            body: formData
+          });
+          const result = await response.json();
+          row.dataset.tone = "success";
+          setText(row.lastElementChild, result.indexing_status === "completed" ? "已导入" : "已提交索引");
+          succeeded += 1;
+        } catch (error) {
+          row.dataset.tone = "error";
+          const message = error.status === 413
+            ? "文件超过服务端大小限制"
+            : error.status === 422
+              ? "资料格式或内容无法解析"
+              : "导入失败，请检查服务后重试";
+          setText(row.lastElementChild, message);
+          failed += 1;
+          if (error.status === 401) break;
+        }
+      }
+
+      setText(byId("knowledgeUploadStatus"), `导入任务完成：成功 ${succeeded} 个，失败 ${failed} 个。`);
+      button.disabled = false;
+      input.disabled = false;
     }
 
     async function checkHealth() {
@@ -988,11 +1411,16 @@
       state.offset = 0;
       await loadData();
     });
+    byId("dingtalkInteractionStatus").addEventListener("change", async (event) => {
+      state.dingtalkStatus = event.target.value;
+      await loadDingTalkInteractions();
+    });
     byId("previousPage").addEventListener("click", async () => { state.offset = Math.max(0, state.offset - state.limit); await loadData(); });
     byId("nextPage").addEventListener("click", async () => { state.offset += state.limit; await loadData(); });
     byId("refreshButton").addEventListener("click", loadData);
     byId("exportEvents").addEventListener("click", () => downloadCsv("events"));
     byId("exportGaps").addEventListener("click", () => downloadCsv("gaps"));
+    byId("uploadKnowledgeButton").addEventListener("click", uploadKnowledgeFiles);
     byId("resumeConfirmButton").addEventListener("click", resumeConversation);
     byId("clearKeyButton").addEventListener("click", () => { sessionStorage.removeItem(KEY_NAME); openKeyDialog("当前标签页的密钥已清除。"); });
 

@@ -1,6 +1,8 @@
 # AI 智能客服
 
-这是一个已通过本地真实组件链路与自动化验收、尚待真实商家灰度验证的 RAG 客服项目：企业资料经 Docling 整理后进入 Dify 知识库，访客通过 Chatwoot 咨询，自研编排服务把消息写入耐久队列，由后台 Worker 调用 Dify Chatflow 与 DeepSeek 回答；资料不足、投诉、支付安全或用户主动要求时转人工。
+这是一个已通过本地真实组件链路与自动化验收、尚待真实商家灰度验证的单企业 RAG 客服交付模板：企业资料经 Docling 整理后进入 Dify 知识库，访客通过 Chatwoot 咨询，自研编排服务把消息写入耐久队列，由后台 Worker 调用 Dify Chatflow 与 DeepSeek 回答；资料不足、投诉、支付安全或用户主动要求时转人工。复制企业配置即可为不同商家独立部署，企业之间不共享数据和密钥。
+
+真实商家知识接入见 [docs/knowledge-onboarding.md](docs/knowledge-onboarding.md)，单服务器上线、HTTPS、备份和恢复见 [docs/production-deployment.md](docs/production-deployment.md)。
 
 ## 每个组件负责什么
 
@@ -27,7 +29,10 @@
 Copy-Item .env.example .env
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements-docling.txt
+.\scripts\prepare-docling-model-image.ps1
 ```
+
+模型准备脚本只下载本服务实际使用的版面、精确表格和中文 Torch OCR 模型，逐个校验大小与 SHA-256 后导入本地模型镜像。已验证的模型会直接复用；首次执行受网络影响可能较慢。
 
 ### 2. 启动 Dify
 
@@ -54,11 +59,7 @@ Dify 控制台位于 <http://127.0.0.1:8081>。首次使用需要创建管理员
 .\scripts\run-docling.ps1
 ```
 
-另开一个终端导入演示资料：
-
-```powershell
-curl.exe -X POST -F "file=@samples/ecommerce/customer-service-faq.md" http://127.0.0.1:5001/v1/knowledge/documents
-```
+知识上传接口受 `OPERATIONS_API_KEY` 保护。推荐在运营看板的“导入企业知识资料”区域选择文件；页面会逐个调用 Docling 整理并提交到当前 Dify 知识库，不需要把 Dify 密钥交给浏览器。
 
 DeepSeek 不提供 embedding API，因此演示环境使用 Dify `economy` 关键词索引；生产项目可接入独立 embedding 和 reranker 后改为 `high_quality`。
 
@@ -68,7 +69,7 @@ DeepSeek 不提供 embedding API，因此演示环境使用 Dify `economy` 关�
 .\scripts\provision-dify-chatflow.ps1
 ```
 
-脚本会导入并发布 `星河优选 AI 客服`，绑定当前知识库，复用或创建应用级 API Key，然后安全写入 `.env`。重复执行不会创建重复应用。
+脚本会按企业配置导入并发布客服应用，绑定当前知识库，复用或创建应用级 API Key，然后安全写入 `.env`。重复执行不会创建重复应用。
 
 ### 5. 启动并配置 Chatwoot
 
@@ -138,13 +139,14 @@ Chatwoot 坐席工作台位于 <http://127.0.0.1:3000>。页面显示“离线�
 Python 服务也可以容器化运行：
 
 ```powershell
+.\scripts\prepare-docling-model-image.ps1
 docker compose up -d --build docling worker
 docker compose ps
 ```
 
 Compose 会让 API 和 Worker 共享 `.runtime/customer-service` SQLite 状态目录，并让容器通过 `host.docker.internal` 访问本机 Dify 和 Chatwoot。只有 API 端口绑定 `127.0.0.1`，Worker 不发布端口。人工 SLA 与托底冷却时间也由项目 `.env` 传给 API 和 Worker。容器模式下 Chatwoot webhook 仍使用：
 
-Dockerfile 会从 PyTorch 官方 CPU 索引安装 Torch，避免在 `DOCLING_DEVICE=cpu` 的环境中下载和打包无用的 CUDA 运行库。
+Dockerfile 会从 PyTorch 官方 CPU 索引安装 Torch，并从通过 SHA-256 校验的本地模型镜像复制 Docling 版面、表格和中文 OCR 模型；运行时不需要联网下载。生产覆盖配置还会让 API/Worker 使用非 root 用户、只读根文件系统和最小 Linux 权限。
 
 ```text
 http://host.docker.internal:5001/v1/chatwoot/webhook
@@ -227,12 +229,12 @@ Chatwoot 鉴权失败或交付重试耗尽后，任务会进入 `failed`，并�
 
 成功后脚本只输出任务已重新排队。不要把数据库、密钥或完整客户消息复制到命令行、工单或聊天记录中。
 
-## 正式上线前仍需完成
+## 正式上线还需要现场完成
 
-- 为 AI 服务和 Chatwoot 配置域名、HTTPS 反向代理、防火墙和请求限流。
-- 关闭 `SAFE_FETCH_ALLOW_PRIVATE_NETWORK`，把 webhook 改成公开 HTTPS 地址。
-- 给知识上传接口增加企业身份认证、租户隔离、审计和恶意文件扫描。
-- 把单机 SQLite 状态迁移到适合多副本的共享数据库或 Redis，并设置备份。
-- 接入集中日志、告警、成本统计和长期数据归档，并为运营看板配置备份。
-- 定期轮换 DeepSeek、Dify 和 Chatwoot 密钥；任何曾出现在聊天或日志中的密钥都应立即作废重建。
-- 使用真实业务资料重新做知识清洗、问答评测、灰度发布和人工客服培训。
+代码侧已经具备生产 Compose、双域名自动 HTTPS、Host 校验、安全响应头、受保护的知识上传、离线 Docling 模型、容器最小权限、健康检查、加密备份和强确认恢复。服务器现场仍需完成：
+
+- 核对服务器规格、Linux/SSH 和数据盘，安装 Docker 与备份工具。
+- 把两个域名解析到服务器，仅开放 SSH、80 和 443，配置 Chatwoot SMTP。
+- 在服务器初始化 Dify/Chatwoot，写入新生成的生产密钥并关闭本地私网 webhook 开关。
+- 导入真实商家资料，完成检索评测、全链路 E2E、3—7 天灰度和人工客服培训。
+- 配置异地备份同步、定时健康告警和密钥轮换；任何曾暴露在聊天或日志中的密钥必须作废重建。
