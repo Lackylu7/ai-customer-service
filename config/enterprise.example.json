@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "company": {
+    "name": "星河优选",
+    "industry": "ecommerce",
+    "website_url": "http://127.0.0.1:8000"
+  },
+  "assistant": {
+    "name": "星河优选 AI 客服",
+    "welcome_title": "你好，欢迎咨询星河优选",
+    "welcome_message": "请告诉我你想了解的商品、物流或售后问题。",
+    "handoff_message": "正在为你转接人工客服，请稍候。"
+  },
+  "dify": {
+    "dataset_name": "星河优选客服知识库",
+    "app_name": "星河优选 AI 客服",
+    "indexing_technique": "economy"
+  },
+  "chatwoot": {
+    "inbox_name": "星河优选网站客服",
+    "widget_color": "#1f6feb"
+  },
+  "locale": "zh_CN",
+  "business_timezone": "Asia/Shanghai"
+}

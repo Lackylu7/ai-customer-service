@@ -1,0 +1,20 @@
+{
+  "baseId": "REPLACE_WITH_DINGTALK_AI_TABLE_BASE_ID",
+  "tableId": "REPLACE_WITH_TABLE_ID",
+  "fieldIds": {
+    "store_name": "REPLACE_WITH_FIELD_ID",
+    "city": "REPLACE_WITH_FIELD_ID",
+    "district": "REPLACE_WITH_FIELD_ID",
+    "opening_date": "REPLACE_WITH_FIELD_ID",
+    "is_physical": "REPLACE_WITH_FIELD_ID",
+    "is_management_scope": "REPLACE_WITH_FIELD_ID",
+    "usage_status": "REPLACE_WITH_FIELD_ID",
+    "store_type": "REPLACE_WITH_FIELD_ID",
+    "store_tier": "REPLACE_WITH_FIELD_ID",
+    "bed_count": "REPLACE_WITH_FIELD_ID",
+    "is_new_store": "REPLACE_WITH_FIELD_ID",
+    "management_store": "REPLACE_WITH_FIELD_ID"
+  },
+  "command": "dws",
+  "timeoutSeconds": 20
+}

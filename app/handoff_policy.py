@@ -3,6 +3,25 @@ from dataclasses import dataclass
 
 _HANDOFF_SENTINEL = "[HANDOFF]"
 _FALLBACK_HANDOFF_TEXT = "当前资料无法确认，请转人工核实。"
+_UNVERIFIED_OPERATION_PHRASES = (
+    "正在为你转接人工",
+    "正在转接人工",
+    "已为你转接人工",
+    "已转接人工",
+    "已转人工",
+    "已创建工单",
+    "工单已创建",
+    "已通知人工客服",
+)
+_KNOWLEDGE_GAP_PHRASES = (
+    "根据现有知识库，我无法回答",
+    "现有知识库中没有",
+    "知识库中没有相关",
+    "未找到相关信息",
+    "没有足够的信息",
+    "现有资料无法确认",
+    "无法从现有资料确认",
+)
 
 _RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
@@ -68,10 +87,31 @@ def parse_dify_answer(answer: str) -> ParsedAnswer:
             customer_text=_FALLBACK_HANDOFF_TEXT,
             needs_human=True,
         )
-    if normalized.upper().startswith(_HANDOFF_SENTINEL):
-        customer_text = normalized[len(_HANDOFF_SENTINEL) :].strip()
+    sentinel_index = normalized.casefold().find(_HANDOFF_SENTINEL.casefold())
+    contains_sentinel = sentinel_index >= 0
+    if contains_sentinel:
+        customer_text = normalized[
+            sentinel_index + len(_HANDOFF_SENTINEL) :
+        ].strip()
+    else:
+        customer_text = normalized
+    contains_knowledge_gap = any(
+        phrase in customer_text for phrase in _KNOWLEDGE_GAP_PHRASES
+    )
+    if contains_sentinel or any(
+        phrase in customer_text for phrase in _UNVERIFIED_OPERATION_PHRASES
+    ) or contains_knowledge_gap:
+        if (
+            contains_knowledge_gap
+            and not contains_sentinel
+        ) or any(phrase in customer_text for phrase in _UNVERIFIED_OPERATION_PHRASES):
+            customer_text = _FALLBACK_HANDOFF_TEXT
         return ParsedAnswer(
             customer_text=customer_text or _FALLBACK_HANDOFF_TEXT,
             needs_human=True,
         )
-    return ParsedAnswer(customer_text=normalized, needs_human=False)
+    return ParsedAnswer(customer_text=customer_text, needs_human=False)
+
+
+def has_handoff_sentinel(answer: str) -> bool:
+    return _HANDOFF_SENTINEL.casefold() in answer.casefold()

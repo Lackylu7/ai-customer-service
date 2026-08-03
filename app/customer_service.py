@@ -8,7 +8,11 @@ from app.chatwoot_client import ChatwootAPIError
 from app.chatwoot_events import IncomingMessage
 from app.conversation_store import ConversationState
 from app.dify_chat_client import DifyChatAPIError, DifyChatResponse
-from app.handoff_policy import handoff_reason, parse_dify_answer
+from app.handoff_policy import (
+    handoff_reason,
+    has_handoff_sentinel,
+    parse_dify_answer,
+)
 from app.job_models import PreparedAction
 from app.operations_models import (
     NullOperationsRecorder,
@@ -123,12 +127,19 @@ class CustomerService:
         chatwoot_client: ChatwootPublisher,
         operations_recorder: OperationsRecorder | None = None,
         monotonic: Callable[[], float] = time.perf_counter,
+        handoff_message: str = _DEFAULT_HANDOFF_TEXT,
     ) -> None:
+        if not isinstance(handoff_message, str):
+            raise ValueError("handoff_message must contain 1-500 characters.")
+        normalized_handoff_message = handoff_message.strip()
+        if not normalized_handoff_message or len(normalized_handoff_message) > 500:
+            raise ValueError("handoff_message must contain 1-500 characters.")
         self._store = store
         self._dify = dify_client
         self._chatwoot = chatwoot_client
         self._operations = operations_recorder or NullOperationsRecorder()
         self._monotonic = monotonic
+        self._handoff_message = normalized_handoff_message
 
     def handle(self, message: IncomingMessage) -> HandlingResult:
         started_at = self._monotonic()
@@ -181,7 +192,7 @@ class CustomerService:
         rule_reason = handoff_reason(message.content)
         if rule_reason is not None:
             return PreparedAction.handoff(
-                self._DEFAULT_HANDOFF_TEXT,
+                self._handoff_message,
                 cast(Reason, rule_reason),
             )
 
@@ -194,14 +205,14 @@ class CustomerService:
         if parsed.needs_human:
             reason: Reason = (
                 "knowledge_gap"
-                if response.answer.strip().upper().startswith("[HANDOFF]")
+                if has_handoff_sentinel(response.answer)
                 else "dify_error"
             )
             return PreparedAction.handoff(parsed.customer_text, reason)
         return PreparedAction.reply(parsed.customer_text, response.conversation_id)
 
     def dify_error_action(self) -> PreparedAction:
-        return PreparedAction.handoff(self._DEFAULT_HANDOFF_TEXT, "dify_error")
+        return PreparedAction.handoff(self._handoff_message, "dify_error")
 
     def human_wait_text(self) -> str:
         return _HUMAN_WAIT_TEXT
@@ -228,7 +239,7 @@ class CustomerService:
                 PreparedAction.customer_message(
                     _HUMAN_WAIT_TEXT,
                     record_knowledge_gap=(
-                        response.answer.strip().upper().startswith("[HANDOFF]")
+                        has_handoff_sentinel(response.answer)
                     ),
                 ),
                 "human_wait_notice",

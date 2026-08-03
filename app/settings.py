@@ -3,6 +3,44 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from app.enterprise_config import EnterpriseConfig, load_enterprise_config
+
+
+@dataclass(frozen=True)
+class ApplicationSettings:
+    environment: str
+    allowed_hosts: tuple[str, ...]
+
+    @property
+    def is_production(self) -> bool:
+        return self.environment == "production"
+
+    @classmethod
+    def from_env(
+        cls,
+        environ: Mapping[str, str] | None = None,
+    ) -> "ApplicationSettings":
+        source = os.environ if environ is None else environ
+        try:
+            environment = source.get("APP_ENV", "development").strip().lower()
+            allowed_hosts = tuple(
+                host.strip()
+                for host in source.get("APP_ALLOWED_HOSTS", "").split(",")
+                if host.strip()
+            )
+        except (AttributeError, TypeError) as exc:
+            raise ValueError("Application security configuration is invalid.") from exc
+        if environment not in {"development", "test", "production"}:
+            raise ValueError("Application security configuration is invalid.")
+        if any(
+            host == "*" or "/" in host or "://" in host or any(c.isspace() for c in host)
+            for host in allowed_hosts
+        ):
+            raise ValueError("Application security configuration is invalid.")
+        if environment == "production" and not allowed_hosts:
+            raise ValueError("Application security configuration is invalid.")
+        return cls(environment=environment, allowed_hosts=allowed_hosts)
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -13,6 +51,7 @@ class Settings:
     chatwoot_api_token: str = field(repr=False)
     chatwoot_webhook_secret: str = field(repr=False)
     customer_service_db_path: Path
+    enterprise_config: EnterpriseConfig
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
@@ -36,6 +75,11 @@ class Settings:
                     ".runtime/customer-service/state.db",
                 ).strip()
             )
+            enterprise_config_path = source.get(
+                "ENTERPRISE_CONFIG_PATH",
+                "config/enterprise.example.json",
+            ).strip()
+            enterprise_config = load_enterprise_config(enterprise_config_path)
         except (AttributeError, TypeError, ValueError) as exc:
             raise ValueError("AI customer service configuration is incomplete.") from exc
 
@@ -58,6 +102,7 @@ class Settings:
             chatwoot_api_token=chatwoot_api_token,
             chatwoot_webhook_secret=webhook_secret,
             customer_service_db_path=database_path,
+            enterprise_config=enterprise_config,
         )
 
 
@@ -65,6 +110,7 @@ class Settings:
 class OperationsSettings:
     api_key: str = field(repr=False)
     database_path: Path
+    dingtalk_database_path: Path = Path(".runtime/customer-service/dingtalk.db")
 
     @classmethod
     def from_env(
@@ -78,16 +124,25 @@ class OperationsSettings:
                 "CUSTOMER_SERVICE_DB_PATH",
                 ".runtime/customer-service/state.db",
             ).strip()
+            dingtalk_database_path = source.get(
+                "DINGTALK_STATE_DB_PATH",
+                ".runtime/customer-service/dingtalk.db",
+            ).strip()
         except (AttributeError, TypeError) as exc:
             raise ValueError("Operations configuration is invalid.") from exc
-        if not database_path:
+        if not database_path or not dingtalk_database_path:
             raise ValueError("Operations configuration is invalid.")
-        return cls(api_key=api_key, database_path=Path(database_path))
+        return cls(
+            api_key=api_key,
+            database_path=Path(database_path),
+            dingtalk_database_path=Path(dingtalk_database_path),
+        )
 
 
 @dataclass(frozen=True)
 class HandoffOperationsSettings:
     chatwoot_base_url: str
+    chatwoot_public_base_url: str
     chatwoot_account_id: int
     chatwoot_api_token: str = field(repr=False)
     database_path: Path
@@ -103,6 +158,10 @@ class HandoffOperationsSettings:
             chatwoot_base_url = source.get(
                 "CHATWOOT_BASE_URL",
                 "http://127.0.0.1:3000",
+            ).strip().rstrip("/")
+            chatwoot_public_base_url = source.get(
+                "CHATWOOT_PUBLIC_BASE_URL",
+                chatwoot_base_url,
             ).strip().rstrip("/")
             chatwoot_account_id = int(
                 source.get("CHATWOOT_ACCOUNT_ID", "").strip()
@@ -126,6 +185,7 @@ class HandoffOperationsSettings:
             ) from exc
         if (
             not chatwoot_base_url
+            or not chatwoot_public_base_url
             or chatwoot_account_id <= 0
             or not chatwoot_api_token
             or not str(database_path)
@@ -134,6 +194,7 @@ class HandoffOperationsSettings:
             raise ValueError("Human handoff operations configuration is invalid.")
         return cls(
             chatwoot_base_url=chatwoot_base_url,
+            chatwoot_public_base_url=chatwoot_public_base_url,
             chatwoot_account_id=chatwoot_account_id,
             chatwoot_api_token=chatwoot_api_token,
             database_path=database_path,
@@ -164,7 +225,7 @@ class WorkerSettings:
                 source.get("CUSTOMER_SERVICE_RECONCILE_INTERVAL_SECONDS", "60").strip()
             )
             generation_max_attempts = int(
-                source.get("CUSTOMER_SERVICE_GENERATION_MAX_ATTEMPTS", "2").strip()
+                source.get("CUSTOMER_SERVICE_GENERATION_MAX_ATTEMPTS", "3").strip()
             )
             delivery_max_attempts = int(
                 source.get("CUSTOMER_SERVICE_DELIVERY_MAX_ATTEMPTS", "5").strip()

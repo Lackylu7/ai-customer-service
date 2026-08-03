@@ -1,6 +1,7 @@
 import argparse
 import base64
 import json
+import os
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -10,7 +11,13 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://127.0.0.1:5001")
     parser.add_argument("--pdf", type=Path, default=Path(".runtime/w3c-dummy.pdf"))
     parser.add_argument("--timeout", type=int, default=1200)
+    parser.add_argument("--api-key", default=os.getenv("OPERATIONS_API_KEY", ""))
     args = parser.parse_args()
+
+    if not args.api_key.strip():
+        raise SystemExit(
+            "OPERATIONS_API_KEY or --api-key is required for the protected conversion API."
+        )
 
     pdf_path = args.pdf.resolve()
     if not pdf_path.is_file():
@@ -32,7 +39,10 @@ def main() -> None:
     request = Request(
         f"{args.base_url.rstrip('/')}/v1/convert/source",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json; charset=utf-8"},
+        headers={
+            "Authorization": f"Bearer {args.api_key}",
+            "Content-Type": "application/json; charset=utf-8",
+        },
         method="POST",
     )
 

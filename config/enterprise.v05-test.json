@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "company": {
+    "name": "深圳伸活健康管理",
+    "industry": "ecommerce",
+    "website_url": "http://127.0.0.1:8000"
+  },
+  "assistant": {
+    "name": "伸活内部服务助手V0.5测试",
+    "welcome_title": "你好，我是伸活内部服务助手V0.5测试版",
+    "welcome_message": "请告诉我你想了解的股东制3.0问题。",
+    "handoff_message": "现有已审核知识不足以确认该问题，请联系对应负责人核实。"
+  },
+  "dify": {
+    "dataset_name": "伸活股东制3.0-V0.5分层验收-20260728",
+    "app_name": "伸活内部服务助手-股东制3.0-V0.5测试",
+    "indexing_technique": "economy"
+  },
+  "chatwoot": {
+    "inbox_name": "伸活内部服务助手V0.5测试",
+    "widget_color": "#1677ff"
+  },
+  "locale": "zh_CN",
+  "business_timezone": "Asia/Shanghai"
+}

@@ -1,4 +1,6 @@
+from collections.abc import Callable
 from dataclasses import dataclass
+from threading import Lock
 from typing import Literal, Protocol
 
 
@@ -65,6 +67,53 @@ class OperationsRecorder(Protocol):
         conversation_id: int,
         created_at: int | None = None,
     ) -> None: ...
+
+
+class RecoveringOperationsRecorder:
+    def __init__(self, factory: Callable[[], OperationsRecorder]) -> None:
+        self._factory = factory
+        self._delegate: OperationsRecorder | None = None
+        self._lock = Lock()
+
+    def record_event(
+        self,
+        *,
+        message_id: int,
+        conversation_id: int,
+        outcome: Outcome,
+        reason: Reason | None,
+        duration_ms: int,
+        created_at: int | None = None,
+    ) -> None:
+        self._recorder().record_event(
+            message_id=message_id,
+            conversation_id=conversation_id,
+            outcome=outcome,
+            reason=reason,
+            duration_ms=duration_ms,
+            created_at=created_at,
+        )
+
+    def record_knowledge_gap(
+        self,
+        *,
+        question: str,
+        conversation_id: int,
+        created_at: int | None = None,
+    ) -> None:
+        self._recorder().record_knowledge_gap(
+            question=question,
+            conversation_id=conversation_id,
+            created_at=created_at,
+        )
+
+    def _recorder(self) -> OperationsRecorder:
+        if self._delegate is not None:
+            return self._delegate
+        with self._lock:
+            if self._delegate is None:
+                self._delegate = self._factory()
+            return self._delegate
 
 
 class NullOperationsRecorder:

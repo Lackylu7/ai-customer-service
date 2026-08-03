@@ -317,6 +317,39 @@ class CustomerServiceTests(unittest.TestCase):
         )
         self.assertEqual(self.operations.gaps, [])
 
+    def test_configured_handoff_message_is_used_for_rules_and_dify_errors(self) -> None:
+        service = CustomerService(
+            store=self.store,
+            dify_client=self.dify,
+            chatwoot_client=self.chatwoot,
+            operations_recorder=self.operations,
+            monotonic=FakeMonotonic(),
+            handoff_message="测试商城正在为你转接人工。",
+        )
+
+        result = service.handle(incoming("我要人工客服", message_id=901))
+
+        self.assertEqual(result.status, "handed_off")
+        self.assertEqual(self.chatwoot.messages, ["测试商城正在为你转接人工。"])
+        self.dify.error = DifyChatAPIError(503, "internal model error")
+        result = service.handle(
+            incoming("普通问题", message_id=902, conversation_id=10)
+        )
+        self.assertEqual(result.status, "handed_off")
+        self.assertEqual(self.chatwoot.messages[-1], "测试商城正在为你转接人工。")
+
+    def test_invalid_configured_handoff_message_is_rejected(self) -> None:
+        for value in ("   ", "x" * 501):
+            with self.subTest(value_length=len(value)), self.assertRaisesRegex(
+                ValueError, "handoff_message"
+            ):
+                CustomerService(
+                    store=self.store,
+                    dify_client=self.dify,
+                    chatwoot_client=self.chatwoot,
+                    handoff_message=value,
+                )
+
     def test_dify_handoff_sentinel_uses_safe_customer_text(self) -> None:
         self.dify.response = DifyChatResponse(
             answer="[HANDOFF]当前资料无法确认，正在为你转接人工客服。",
@@ -329,7 +362,7 @@ class CustomerServiceTests(unittest.TestCase):
         self.assertEqual(result.status, "handed_off")
         self.assertEqual(
             self.chatwoot.messages,
-            ["当前资料无法确认，正在为你转接人工客服。"],
+            ["当前资料无法确认，请转人工核实。"],
         )
         self.assertNotIn("[HANDOFF]", self.chatwoot.messages[0])
         self.assertEqual(self.operations.events[-1]["reason"], "knowledge_gap")

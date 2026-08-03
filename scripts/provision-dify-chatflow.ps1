@@ -1,18 +1,30 @@
 param(
-    [string]$EnvPath = (Join-Path (Split-Path -Parent $PSScriptRoot) ".env")
+    [string]$ConfigPath = "config\enterprise.example.json",
+    [string]$EnvPath = ".env",
+    [string]$FixturePath = ""
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$dslTemplatePath = Join-Path $projectRoot "infra\dify\star-river-customer-service.yml"
+$pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
+$configCliPath = Join-Path $projectRoot "app\enterprise_config.py"
+$dslTemplatePath = Join-Path $projectRoot "infra\dify\customer-service-template.yml"
 $provisionerPath = Join-Path $PSScriptRoot "provision_dify_chatflow.py"
 $containerName = "docker-api-1"
 $operationId = [Guid]::NewGuid().ToString("N")
-$containerDslPath = "/tmp/star-river-chatflow-$operationId.yml"
-$containerProvisionerPath = "/tmp/provision-dify-chatflow-$operationId.py"
-$containerSecretPath = "/tmp/dify-app-key-$operationId"
-$renderedDslPath = Join-Path ([IO.Path]::GetTempPath()) "star-river-chatflow-$operationId.yml"
-$localSecretPath = Join-Path ([IO.Path]::GetTempPath()) "dify-app-key-$operationId"
+$containerDslPath = "/tmp/customer-service-$operationId.yml"
+$containerConfigPath = "/tmp/enterprise-$operationId.json"
+$containerProvisionerPath = "/tmp/provision-dify-$operationId.py"
+$containerSecretPath = "/tmp/dify-resources-$operationId.json"
+$localSecretPath = Join-Path ([IO.Path]::GetTempPath()) "dify-resources-$operationId.json"
+
+function Resolve-ProjectPath {
+    param([string]$Path)
+    if ([IO.Path]::IsPathRooted($Path)) {
+        return [IO.Path]::GetFullPath($Path)
+    }
+    return [IO.Path]::GetFullPath((Join-Path $projectRoot $Path))
+}
 
 function Read-EnvValues {
     param([string]$Path)
@@ -41,71 +53,99 @@ function Set-EnvValue {
     $Lines.Add("$prefix$Value")
 }
 
-if (-not (Test-Path -LiteralPath $EnvPath)) {
-    throw "Local .env file does not exist."
-}
-if (-not (Test-Path -LiteralPath $dslTemplatePath)) {
-    throw "Dify Chatflow DSL does not exist."
+$resolvedConfigPath = Resolve-ProjectPath -Path $ConfigPath
+$resolvedEnvPath = Resolve-ProjectPath -Path $EnvPath
+$resolvedFixturePath = if ($FixturePath) { Resolve-ProjectPath -Path $FixturePath } else { "" }
+
+foreach ($requiredPath in @($pythonPath, $configCliPath, $dslTemplatePath, $provisionerPath, $resolvedConfigPath, $resolvedEnvPath)) {
+    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+        throw "Dify enterprise provisioning prerequisite is missing."
+    }
 }
 
-$health = Invoke-WebRequest -Uri "http://127.0.0.1:8081/" -UseBasicParsing -TimeoutSec 15
-if ($health.StatusCode -ne 200) {
-    throw "Dify is not healthy."
+$configOutput = & $pythonPath $configCliPath --path $resolvedConfigPath --print-json 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw (($configOutput | Select-Object -Last 1) -join "")
 }
-
-$envValues = Read-EnvValues -Path $EnvPath
-$datasetId = $envValues["DIFY_DATASET_ID"]
-if ([string]::IsNullOrWhiteSpace($datasetId)) {
-    throw "DIFY_DATASET_ID is not configured."
-}
+$enterprise = ($configOutput -join [Environment]::NewLine) | ConvertFrom-Json
+$metadata = $null
+$envValues = Read-EnvValues -Path $resolvedEnvPath
 
 try {
-    $dslTemplate = [IO.File]::ReadAllText($dslTemplatePath, [Text.Encoding]::UTF8)
-    $renderedDsl = $dslTemplate.Replace("__DIFY_DATASET_ID__", $datasetId)
-    [IO.File]::WriteAllText($renderedDslPath, $renderedDsl, [Text.UTF8Encoding]::new($false))
-
-    docker cp $renderedDslPath "${containerName}:$containerDslPath" | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Failed to copy the Dify DSL." }
-    docker cp $provisionerPath "${containerName}:$containerProvisionerPath" | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Failed to copy the Dify provisioner." }
-
-    $previousErrorAction = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    $provisionOutput = docker exec --workdir /app/api -e PYTHONPATH=/app/api $containerName python $containerProvisionerPath --dsl $containerDslPath --secret-output $containerSecretPath 2>&1
-    $provisionExitCode = $LASTEXITCODE
-    $ErrorActionPreference = $previousErrorAction
-    if ($provisionExitCode -ne 0) {
-        $diagnostic = (($provisionOutput | Select-Object -Last 20) -join [Environment]::NewLine)
-        $diagnostic = $diagnostic -replace 'app-[A-Za-z0-9_-]+', 'app-[REDACTED]'
-        $diagnostic = $diagnostic -replace 'dataset-[A-Za-z0-9_-]+', 'dataset-[REDACTED]'
-        $diagnostic = $diagnostic -replace 'sk-[A-Za-z0-9_-]+', 'sk-[REDACTED]'
-        throw "Dify Chatflow provisioning failed. $diagnostic"
+    if ($resolvedFixturePath) {
+        if (-not (Test-Path -LiteralPath $resolvedFixturePath -PathType Leaf)) {
+            throw "Dify fixture file does not exist."
+        }
+        $metadata = [IO.File]::ReadAllText($resolvedFixturePath, [Text.Encoding]::UTF8) | ConvertFrom-Json
     }
-    $metadataLine = $provisionOutput | Where-Object { $_ -match '^\{"app_id"' } | Select-Object -Last 1
-    if (-not $metadataLine) {
-        throw "Dify Chatflow provisioning returned no metadata."
-    }
-    $metadata = $metadataLine | ConvertFrom-Json
+    else {
+        $difyBaseUrl = [string]$envValues["DIFY_BASE_URL"]
+        if ([string]::IsNullOrWhiteSpace($difyBaseUrl)) {
+            $difyBaseUrl = "http://127.0.0.1:8081"
+        }
+        $health = Invoke-WebRequest -Uri $difyBaseUrl.TrimEnd('/') -UseBasicParsing -TimeoutSec 15
+        if ($health.StatusCode -ne 200) {
+            throw "Dify is not healthy."
+        }
 
-    docker cp "${containerName}:$containerSecretPath" $localSecretPath | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Failed to transfer the Dify app key." }
-    $appKey = [IO.File]::ReadAllText($localSecretPath, [Text.Encoding]::UTF8).Trim()
-    if ([string]::IsNullOrWhiteSpace($appKey)) {
-        throw "Dify generated an empty app key."
+        foreach ($copy in @(
+            @($dslTemplatePath, $containerDslPath),
+            @($resolvedConfigPath, $containerConfigPath),
+            @($provisionerPath, $containerProvisionerPath)
+        )) {
+            & docker cp $copy[0] "${containerName}:$($copy[1])" 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Failed to copy a Dify provisioning file." }
+        }
+
+        $previousErrorAction = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $provisionOutput = & docker exec --workdir /app/api -e PYTHONPATH=/app/api `
+            $containerName python $containerProvisionerPath `
+            --dsl $containerDslPath `
+            --enterprise-config $containerConfigPath `
+            --secret-output $containerSecretPath 2>&1
+        $provisionExitCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousErrorAction
+        if ($provisionExitCode -ne 0) {
+            throw "Dify enterprise provisioning failed."
+        }
+
+        & docker cp "${containerName}:$containerSecretPath" $localSecretPath 2>$null | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Failed to transfer Dify resource metadata." }
+        $metadata = [IO.File]::ReadAllText($localSecretPath, [Text.Encoding]::UTF8) | ConvertFrom-Json
+    }
+
+    $values = @{
+        DIFY_DATASET_ID = [string]$metadata.dataset_id
+        DIFY_DATASET_API_KEY = [string]$metadata.dataset_api_key
+        DIFY_INDEXING_TECHNIQUE = [string]$enterprise.dify.indexing_technique
+        DIFY_APP_ID = [string]$metadata.app_id
+        DIFY_APP_API_KEY = [string]$metadata.app_api_key
+    }
+    foreach ($name in $values.Keys) {
+        if ([string]::IsNullOrWhiteSpace($values[$name])) {
+            throw "Dify enterprise provisioning returned incomplete metadata."
+        }
     }
 
     $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.AddRange([IO.File]::ReadAllLines($EnvPath, [Text.Encoding]::UTF8))
-    Set-EnvValue -Lines $lines -Name "DIFY_APP_ID" -Value ([string]$metadata.app_id)
-    Set-EnvValue -Lines $lines -Name "DIFY_APP_API_KEY" -Value $appKey
-    [IO.File]::WriteAllLines($EnvPath, $lines, [Text.UTF8Encoding]::new($false))
-
-    Write-Output "PASS: Dify Chatflow is published and its app key is stored locally."
+    $lines.AddRange([IO.File]::ReadAllLines($resolvedEnvPath, [Text.Encoding]::UTF8))
+    foreach ($name in $values.Keys) {
+        Set-EnvValue -Lines $lines -Name $name -Value $values[$name]
+    }
+    [IO.File]::WriteAllLines($resolvedEnvPath, $lines, [Text.UTF8Encoding]::new($false))
+    Write-Output "PASS: Dify knowledge base and Chatflow are configured for the enterprise."
 }
 finally {
-    $appKey = $null
+    $metadata = $null
     $envValues.Clear()
-    Remove-Item -LiteralPath $renderedDslPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $localSecretPath -Force -ErrorAction SilentlyContinue
-    docker exec --user root $containerName sh -c "rm -f '$containerDslPath' '$containerProvisionerPath' '$containerSecretPath'" 2>$null | Out-Null
+    if (-not $resolvedFixturePath) {
+        $previousErrorAction = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        & docker exec --user root $containerName rm -f `
+            $containerDslPath $containerConfigPath $containerProvisionerPath $containerSecretPath `
+            2>$null | Out-Null
+        $ErrorActionPreference = $previousErrorAction
+    }
 }

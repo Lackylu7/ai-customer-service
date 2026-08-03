@@ -1,14 +1,14 @@
 param(
     [string]$BaseUrl = "http://127.0.0.1:5001",
-    [string]$ApiKey = $env:DOCLING_SERVE_API_KEY
+    [string]$ApiKey = $env:OPERATIONS_API_KEY
 )
 
 $ErrorActionPreference = "Stop"
 
-$headers = @{}
-if ($ApiKey) {
-    $headers["X-Api-Key"] = $ApiKey
+if ([string]::IsNullOrWhiteSpace($ApiKey)) {
+    throw "OPERATIONS_API_KEY or -ApiKey is required for the protected conversion API."
 }
+$headers = @{ Authorization = "Bearer $ApiKey" }
 
 try {
     $docsRequest = @{

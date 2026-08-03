@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$dslPath = Join-Path $projectRoot "infra\dify\star-river-customer-service.yml"
+$dslPath = Join-Path $projectRoot "infra\dify\customer-service-template.yml"
 $pythonPath = Join-Path $projectRoot ".venv\Scripts\python.exe"
 
 if (-not (Test-Path -LiteralPath $dslPath)) {
@@ -15,6 +15,7 @@ from pathlib import Path
 import yaml
 
 data = yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8"))
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
 assert data["version"] == "0.3.1"
 assert data["kind"] == "app"
 assert data["app"]["mode"] == "advanced-chat"
@@ -23,26 +24,57 @@ nodes = data["workflow"]["graph"]["nodes"]
 by_type = {}
 for node in nodes:
     by_type.setdefault(node["data"]["type"], []).append(node)
-for node_type in ("start", "knowledge-retrieval", "llm", "answer"):
-    assert len(by_type.get(node_type, [])) == 1, node_type
+assert len(by_type.get("start", [])) == 1
+assert len(by_type.get("knowledge-retrieval", [])) == 1
+assert len(by_type.get("llm", [])) == 2
+assert len(by_type.get("answer", [])) == 1
 
 knowledge = by_type["knowledge-retrieval"][0]
-llm = by_type["llm"][0]
+llms = {node["id"]: node for node in by_type["llm"]}
+understanding = llms["query-understanding"]
+llm = llms["llm"]
 answer = by_type["answer"][0]
 assert knowledge["data"]["dataset_ids"] == ["__DIFY_DATASET_ID__"]
-assert knowledge["data"]["query_variable_selector"] == ["start", "sys.query"]
+assert knowledge["data"]["query_variable_selector"] == ["query-understanding", "text"]
+assert understanding["data"]["model"]["name"] == "deepseek-chat"
+assert understanding["data"]["memory"]["window"]["enabled"] is True
+assert understanding["data"]["memory"]["window"]["size"] == 10
+understanding_prompt = "\n".join(
+    item["text"] for item in understanding["data"]["prompt_template"]
+)
+assert understanding_prompt == "__QUERY_UNDERSTANDING_PROMPT__"
 assert llm["data"]["model"]["name"] == "deepseek-chat"
 assert "deepseek" in llm["data"]["model"]["provider"].lower()
 assert llm["data"]["context"]["variable_selector"] == ["knowledge", "result"]
 prompt = "\n".join(item["text"] for item in llm["data"]["prompt_template"])
-assert "[HANDOFF]" in prompt
-assert "\u4e0d\u5f97\u7f16\u9020" in prompt
-assert "{{#context#}}" in prompt
+assert prompt == "__SYSTEM_PROMPT__"
+assert data["app"]["name"] == "__DIFY_APP_NAME__"
+assert data["app"]["description"] == "__APP_DESCRIPTION__"
+assert data["workflow"]["features"]["opening_statement"] == "__OPENING_STATEMENT__"
+assert knowledge["data"]["desc"] == "__KNOWLEDGE_DESCRIPTION__"
 assert answer["data"]["answer"] == "{{#llm.text#}}"
+
+expected = {
+    "__APP_DESCRIPTION__",
+    "__DIFY_APP_NAME__",
+    "__OPENING_STATEMENT__",
+    "__DIFY_DATASET_ID__",
+    "__KNOWLEDGE_DESCRIPTION__",
+    "__SYSTEM_PROMPT__",
+    "__QUERY_UNDERSTANDING_PROMPT__",
+}
+for placeholder in expected:
+    assert placeholder in text, placeholder
+assert "\u661f\u6cb3\u4f18\u9009" not in text
 
 edges = data["workflow"]["graph"]["edges"]
 pairs = {(edge["source"], edge["target"]) for edge in edges}
-assert pairs == {("start", "knowledge"), ("knowledge", "llm"), ("llm", "answer")}
+assert pairs == {
+    ("start", "query-understanding"),
+    ("query-understanding", "knowledge"),
+    ("knowledge", "llm"),
+    ("llm", "answer"),
+}
 '@
 
 $validator | & $pythonPath - $dslPath

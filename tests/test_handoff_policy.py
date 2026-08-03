@@ -1,6 +1,10 @@
 import unittest
 
-from app.handoff_policy import handoff_reason, parse_dify_answer
+from app.handoff_policy import (
+    handoff_reason,
+    has_handoff_sentinel,
+    parse_dify_answer,
+)
 
 
 class HandoffPolicyTests(unittest.TestCase):
@@ -32,6 +36,41 @@ class HandoffPolicyTests(unittest.TestCase):
 
     def test_dify_handoff_sentinel_is_not_shown_to_customer(self) -> None:
         parsed = parse_dify_answer("[HANDOFF]当前资料无法确认，请转人工核实。")
+
+        self.assertTrue(parsed.needs_human)
+        self.assertEqual(parsed.customer_text, "当前资料无法确认，请转人工核实。")
+
+    def test_embedded_sentinel_is_removed_and_marks_handoff(self) -> None:
+        parsed = parse_dify_answer(
+            "抱歉，当前资料没有说明。 [HANDOFF]正在为你转接人工客服，请稍候。"
+        )
+
+        self.assertTrue(parsed.needs_human)
+        self.assertEqual(parsed.customer_text, "当前资料无法确认，请转人工核实。")
+
+    def test_text_before_embedded_sentinel_is_not_sent_to_customer(self) -> None:
+        parsed = parse_dify_answer(
+            "您好，现有知识库中没有相关流程。建议先联系人事。\n\n"
+            "[HANDOFF]现有知识不足以安全确认该问题，需要联系对应负责人核实。"
+        )
+
+        self.assertTrue(parsed.needs_human)
+        self.assertEqual(
+            parsed.customer_text,
+            "现有知识不足以安全确认该问题，需要联系对应负责人核实。",
+        )
+
+    def test_handoff_sentinel_detection_is_case_insensitive(self) -> None:
+        self.assertTrue(has_handoff_sentinel("说明文字 [handoff]请人工核实"))
+
+    def test_unverified_handoff_operation_is_replaced(self) -> None:
+        parsed = parse_dify_answer("正在为你转接人工客服，请稍候。")
+
+        self.assertTrue(parsed.needs_human)
+        self.assertEqual(parsed.customer_text, "当前资料无法确认，请转人工核实。")
+
+    def test_plain_language_knowledge_gap_is_replaced(self) -> None:
+        parsed = parse_dify_answer("抱歉，根据现有知识库，我无法回答这个问题。")
 
         self.assertTrue(parsed.needs_human)
         self.assertEqual(parsed.customer_text, "当前资料无法确认，请转人工核实。")

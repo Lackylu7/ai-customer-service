@@ -1,5 +1,6 @@
 import base64
 import binascii
+import hmac
 import logging
 import os
 import sqlite3
@@ -7,10 +8,12 @@ import time
 from dataclasses import asdict
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.chatwoot_client import ChatwootClient
 from app.chatwoot_webhook import (
@@ -23,28 +26,69 @@ from app.customer_service import CustomerService
 from app.dify_chat_client import DifyChatClient
 from app.dify_client import DifyAPIError, DifyClient
 from app.document_parser import DocumentParsingError, parse_document
-from app.knowledge_ingestion import FileTooLargeError, KnowledgeIngestionService
+from app.knowledge_ingestion import (
+    FileTooLargeError,
+    KnowledgeIngestionService,
+    validate_document_upload,
+)
 from app.inbound_queue import InboundQueue
 from app.job_store import SQLiteJobStore
 from app.operations_api import operations_router
-from app.operations_models import NullOperationsRecorder, OperationsRecorder
+from app.operations_models import OperationsRecorder, RecoveringOperationsRecorder
 from app.operations_store import OperationsStore
-from app.settings import Settings
+from app.settings import ApplicationSettings, OperationsSettings, Settings
 
 
-app = FastAPI(
-    title="AI Customer Service Document API",
-    version="0.1.0",
-)
+def create_fastapi_application(settings: ApplicationSettings) -> FastAPI:
+    application = FastAPI(
+        title="AI Customer Service Document API",
+        version="0.1.0",
+        docs_url=None if settings.is_production else "/docs",
+        redoc_url=None if settings.is_production else "/redoc",
+        openapi_url=None if settings.is_production else "/openapi.json",
+    )
+    if settings.is_production:
+        application.add_middleware(
+            TrustedHostMiddleware,
+            allowed_hosts=list(settings.allowed_hosts),
+        )
+
+    @application.middleware("http")
+    async def add_security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Permissions-Policy"] = (
+            "camera=(), microphone=(), geolocation=(), payment=()"
+        )
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; style-src 'self' 'unsafe-inline'; "
+            "script-src 'self' 'unsafe-inline'; connect-src 'self'; "
+            "img-src 'self' data:; base-uri 'none'; form-action 'none'; "
+            "frame-ancestors 'none'"
+        )
+        if settings.is_production:
+            response.headers["Strict-Transport-Security"] = (
+                "max-age=31536000; includeSubDomains"
+            )
+        return response
+
+    return application
+
+
+application_settings = ApplicationSettings.from_env()
+app = create_fastapi_application(application_settings)
 app.include_router(operations_router)
 logger = logging.getLogger(__name__)
 MAX_UPLOAD_FILE_SIZE = 20 * 1024 * 1024
+MAX_BASE64_FILE_SIZE = ((MAX_UPLOAD_FILE_SIZE + 2) // 3) * 4
 OPERATIONS_PAGE = Path(__file__).parent / "static" / "operations.html"
 
 
 class FileSource(BaseModel):
-    base64_string: str
-    filename: str = Field(min_length=1)
+    base64_string: str = Field(min_length=1, max_length=MAX_BASE64_FILE_SIZE)
+    filename: str = Field(min_length=1, max_length=255)
 
 
 class ConversionOptions(BaseModel):
@@ -65,6 +109,37 @@ def health() -> dict[str, str]:
 
 def current_timestamp() -> int:
     return int(time.time())
+
+
+def require_knowledge_admin(request: Request) -> None:
+    try:
+        api_key = OperationsSettings.from_env().api_key
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge administration is not configured.",
+        ) from exc
+    if not api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Knowledge administration is not configured.",
+        )
+    authorization = request.headers.get("Authorization", "")
+    scheme, separator, provided = authorization.partition(" ")
+    if (
+        not separator
+        or scheme.casefold() != "bearer"
+        or not provided
+        or not hmac.compare_digest(
+            provided.encode("utf-8"),
+            api_key.encode("utf-8"),
+        )
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid knowledge administration credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 @app.get("/ready")
@@ -113,18 +188,12 @@ def get_customer_service(settings: Settings) -> CustomerService:
         operations_recorder=get_operations_recorder(
             settings.customer_service_db_path
         ),
+        handoff_message=settings.enterprise_config.assistant.handoff_message,
     )
 
 
 def get_operations_recorder(database_path: Path) -> OperationsRecorder:
-    try:
-        return OperationsStore(database_path)
-    except Exception:
-        logger.warning(
-            "Operations store initialization failed; metrics are disabled.",
-            exc_info=True,
-        )
-        return NullOperationsRecorder()
+    return RecoveringOperationsRecorder(lambda: OperationsStore(database_path))
 
 
 @lru_cache(maxsize=8)
@@ -180,7 +249,10 @@ async def chatwoot_webhook(request: Request, response: Response) -> dict[str, st
 
 
 @app.post("/v1/convert/source")
-def convert_source(request: ConversionRequest) -> dict[str, object]:
+def convert_source(
+    request: ConversionRequest,
+    _admin: Annotated[None, Depends(require_knowledge_admin)],
+) -> dict[str, object]:
     source = request.file_sources[0]
 
     try:
@@ -191,8 +263,11 @@ def convert_source(request: ConversionRequest) -> dict[str, object]:
     started_at = time.perf_counter()
 
     try:
+        validate_document_upload(content, source.filename)
         markdown = parse_document(content, source.filename)
     except DocumentParsingError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     return {
@@ -211,7 +286,10 @@ def convert_source(request: ConversionRequest) -> dict[str, object]:
 
 
 @app.post("/v1/knowledge/documents", status_code=202)
-def ingest_knowledge_document(file: UploadFile = File(...)) -> dict[str, object]:
+def ingest_knowledge_document(
+    _admin: Annotated[None, Depends(require_knowledge_admin)],
+    file: UploadFile = File(...),
+) -> dict[str, object]:
     dify_base_url = os.getenv("DIFY_BASE_URL", "http://127.0.0.1:8081")
     dataset_id = os.getenv("DIFY_DATASET_ID", "").strip()
     api_key = os.getenv("DIFY_DATASET_API_KEY", "").strip()

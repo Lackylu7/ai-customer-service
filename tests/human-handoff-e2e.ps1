@@ -357,8 +357,16 @@ try {
             throw "Docker Compose is unavailable for Worker isolation."
         }
         if ($runningWorker.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($runningWorker[0])) {
-            & docker compose stop worker 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) {
+            $previousErrorAction = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = "Continue"
+                & docker compose stop worker *> $null
+                $stopExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $previousErrorAction
+            }
+            if ($stopExitCode -ne 0) {
                 throw "The regular Worker could not be stopped."
             }
             $composeWorkerWasRunning = $true
@@ -598,8 +606,16 @@ finally {
     if ($composeWorkerWasRunning) {
         Push-Location $envDirectory
         try {
-            & docker compose up -d --no-deps worker 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) {
+            $previousErrorAction = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = "Continue"
+                & docker compose up -d --no-deps worker *> $null
+                $restartExitCode = $LASTEXITCODE
+            }
+            finally {
+                $ErrorActionPreference = $previousErrorAction
+            }
+            if ($restartExitCode -ne 0) {
                 Write-Warning "The regular Compose Worker must be restarted manually."
             }
         }

@@ -1,6 +1,7 @@
 param(
     [string]$EnvPath = (Join-Path (Split-Path -Parent $PSScriptRoot) ".env"),
-    [string]$CasesPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "samples\ecommerce\rag-evaluation.jsonl")
+    [string]$CasesPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "samples\ecommerce\rag-evaluation.jsonl"),
+    [string]$DatasetName
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,6 +28,19 @@ if (
 }
 
 $headers = @{ Authorization = "Bearer $apiKey"; Accept = "application/json" }
+if (-not [string]::IsNullOrWhiteSpace($DatasetName)) {
+    $datasets = Invoke-RestMethod `
+        -Uri "$baseUrl/v1/datasets?page=1&limit=100" `
+        -Method Get `
+        -Headers $headers `
+        -TimeoutSec 60
+    $matches = @($datasets.data | Where-Object { $_.name -eq $DatasetName })
+    if ($matches.Count -ne 1) {
+        throw "Dify dataset name must match exactly one dataset."
+    }
+    $datasetId = [string]$matches[0].id
+}
+
 $cases = @(
     [IO.File]::ReadAllLines($CasesPath, [Text.Encoding]::UTF8) |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
@@ -36,8 +50,15 @@ $passed = 0
 
 try {
     foreach ($case in $cases) {
+        $query = [string]$case.question
+        if (
+            $case.PSObject.Properties.Name -contains "retrieval_query" -and
+            -not [string]::IsNullOrWhiteSpace([string]$case.retrieval_query)
+        ) {
+            $query = [string]$case.retrieval_query
+        }
         $payload = @{
-            query = [string]$case.question
+            query = $query
             retrieval_model = @{
                 search_method = "keyword_search"
                 reranking_enable = $false
